@@ -1,0 +1,211 @@
+--------- [Delivery Note, Sales Order, Delivery Trip] Delivery Note Cancellations Report ------------
+------------------------------ Created By : Jimmy ---------------------------------------------------
+------------------- Last Updated By : Jimmy > Added Zero MD Route Flag 
+with
+----------------------------------Uploaded Tables----------------------------------------------------
+regional_mapping as (
+                    select distinct country,
+                    region,
+                    sub_region,
+                    division,
+                    original_territory_id,
+                    new_territory_id
+                    from `kyosk-prod.karuru_upload_tables.territory_region_mapping`
+                      ),
+new_categories_items as (
+                        select distinct product_bundle_id 
+                        from `karuru_reports.new_categories_items_list`
+                        ),
+uploaded_zero_md_routes_cte as (
+                                select distinct country_id,
+                                territory_id,
+                                route_id,
+                                route_name,
+                                zero_md_route
+                                from `kyosk-prod.karuru_upload_tables.zero_md_routes` 
+                                where zero_md_route = true
+                                ),
+------------------------------------ DT ------------------------------------------------------------
+karuru_dts as (
+                select *,
+                row_number()over(partition by id order by updated_at desc) as index
+                FROM `kyosk-prod.karuru_reports.delivery_trips` 
+                where date_trunc(date(created_at),month) >= date_sub(date_trunc(current_date, month), interval 2 month)
+                --where date(created_at) between '2024-06-01' and '2024-06-30'
+                --where date(created_at) <= '2023-12-04'
+                and territory_id not in ('Test UG Territory', 'Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test Fresh TZ Territory')
+                ),
+dt_with_index as ( select distinct id, 
+                  code
+                  from karuru_dts
+                  where index = 1
+                  ),
+---------------------------- Fulfilment Centers --------------------
+fulfillment_center as (
+                        SELECT *,
+                        row_number()over(partition by id order by updated_at desc) as index 
+                        FROM `kyosk-prod.karuru_reports.fulfillment_center` 
+                        WHERE date(created_at) > "2021-06-27" #start date
+                        ),
+fulfillment_center_cte as (
+                            select distinct --date(created_at) created_at,
+                            id,
+                            name,
+                            --country_code,
+                            location.latitude,
+                            location.longitude
+                            from fulfillment_center
+                            where index =1 
+                            ),
+------------------------------------- DN ---------------------------------------------------------------
+delivery_notes_cte as (
+                select *,
+                row_number()over(partition by id order by updated_at desc ) as index
+                from `karuru_reports.delivery_notes` 
+                where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 2 month)
+                --where date(created_at) >= '2024-07-10'
+                --where date(created_at) between '2024-06-01' and '2024-06-30'
+                and territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+              ),
+dns_items_cte as (
+                  select distinct 
+                  case 
+                      when dn.country_code in ('TZ','KE','UG') then date_add(coalesce(dn.delivery_date,dn.updated_at), interval 3 hour)
+                      when dn.country_code in ('NG') then date_add(coalesce(dn.delivery_date,dn.updated_at), interval 1 hour)
+                  else dn.delivery_date end as delivery_timestamp,
+                  coalesce(dn.scheduled_delivery_date, dn.delivery_window.delivery_date) as scheduled_delivery_date,
+                  dn.delivery_window.start_time as start_time,
+                  dn.delivery_window.end_time as end_time,
+                  case
+                    when CHAR_LENGTH(dn.delivery_window.start_time) > 2 then left(right(dn.delivery_window.start_time, 7),1)
+                  else dn.delivery_window.start_time end as delivery_window_start_time,
+                  case
+                    when CHAR_LENGTH(dn.delivery_window.start_time) > 2 then left(right(dn.delivery_window.end_time, 8),2)
+                  else dn.delivery_window.start_time end as delivery_window_end_time,
+                  
+                  dn.so_created_date as order_date,
+                  --so.creation_date as order_date,
+                  
+                  dn.country_code,
+                  rm.new_territory_id as territory_id, 
+                  dn.route_name,
+                  case when dn.route_id = uzmdr.route_id then 'YES' else 'NO' end as zero_md_route,
+                  dn.fullfilment_center_id,
+                  --fc.name,
+                  case when fc.name = "Khetia " then 'Khetia' 
+                        when fc.name = 'Kapa Oil Mahitaji FC' then 'Kapa Oil Mahitaji FC'
+                  else rm.new_territory_id  end as fullfilment_center_name,
+                  rm.region,
+                  rm.sub_region,
+                  rm.division,
+
+                  dn.code as delivery_note,
+                  dn.id as delivery_note_id,
+                  dtwi.code as delivery_trip,
+                  dn.status ,
+                  dn.sale_order_id,
+
+                  dn.agent_name,
+                  driver.name as driver_name,
+                  dn.outlet_id,
+                  dn.outlet.name as outlet_name,
+                  dn.outlet.phone_number as phone_number,
+                  
+                  oi.product_bundle_id,
+                  oi.item_group_id,
+                  coalesce(NULLIF(oi.cancellation_reason,''),so_cancellation_reason) as cancellation_reason,
+                  oi.status as item_status,
+                  oi.uom,
+                  oi.product_bundle_id = nci.product_bundle_id as is_new_category,
+                  oi.original_item_qty,
+                  oi.original_item_qty * oi.discount_amount as discount_amount,
+                  oi.total_orderd  - (oi.original_item_qty * oi.discount_amount) as total_orderd,
+                  2/100 as cancellation_target,
+                  case 
+                    when (oi.status = 'ITEM_CANCELLED') and (oi.cancellation_reason <> '') then (oi.total_orderd  - (oi.original_item_qty * oi.discount_amount)) else 0 
+                  end as returned_amount,
+                  case 
+                    when oi.status = 'ITEM_CANCELLED' and oi.cancellation_reason = '' then (oi.total_orderd  - (oi.original_item_qty * oi.discount_amount)) else 0 
+                  end as withdrawn_amount,
+                  case 
+                    when oi.status = 'ITEM_OPS_CANCELLED'  then (oi.total_orderd  - (oi.original_item_qty * oi.discount_amount)) else 0 
+                  end as ops_cancelled_amount,
+                  case 
+                    when oi.status in ( 'ITEM_CANCELLED','ITEM_OPS_CANCELLED') then (oi.total_orderd  - (oi.original_item_qty * oi.discount_amount)) else 0 
+                  end as cancelled_amount,
+                  case 
+                    when dn.status = 'EXPIRED' then (oi.total_orderd  - (oi.original_item_qty * oi.discount_amount)) else 0 
+                  end as expired_amount
+                  from delivery_notes_cte dn,unnest(order_items)oi
+                  left join regional_mapping rm on dn.territory_id = rm.original_territory_id
+                  left join new_categories_items nci on oi.product_bundle_id = nci.product_bundle_id
+                  left join dt_with_index dtwi on dn.delivery_trip_id = dtwi.id
+                  left join fulfillment_center_cte fc on dn.fullfilment_center_id = fc.id
+                  left join uploaded_zero_md_routes_cte uzmdr on dn.route_id = uzmdr.route_id
+                  where dn.index = 1
+                  ),
+dns_cancellations_with_delivery_hour as (
+                                    select distinct dni.scheduled_delivery_date,
+                                    --dni.start_time, # data validation by Rodgers
+                                    --dni.end_time, # data validation by Rodgers
+                                    CAST(dni.delivery_window_start_time AS INT64) as delivery_window_start_time,
+                                    CAST(dni.delivery_window_end_time AS INT64) as delivery_window_end_time,
+                                    dni.delivery_timestamp,
+                                    date(dni.delivery_timestamp) as delivery_date,
+                                    EXTRACT(HOUR FROM dni.delivery_timestamp) as delivery_hour,
+                                    dni.order_date,
+
+                                    dni.country_code,
+                                    dni.territory_id,
+                                    dni.fullfilment_center_id,
+                                    dni.fullfilment_center_name,
+                                    dni.region,
+                                    dni.sub_region,
+                                    dni.division,
+                                    dni.route_name,
+                                    dni.zero_md_route,
+                                    
+                                    dni.outlet_id,
+                                    dni.outlet_name,
+                                    dni.phone_number,
+
+                                    dni.sale_order_id,
+                                    dni.delivery_note,
+                                    dni.delivery_note_id,
+                                    dni.status,
+                                    dni.delivery_trip,
+
+                                    dni.agent_name,
+                                    dni.driver_name,
+
+                                    dni.item_group_id,
+                                    dni.is_new_category,
+                                    dni.product_bundle_id,
+                                    dni.uom,
+                                    dni.item_status,
+                                    --case when dni.cancellation_reason = 'EXCEEDED_DISPATCH_COST' then 'Customer Cancelled - Refused Reschedule' else dni.cancellation_reason end as cancellation_reason,
+                                    dni.cancellation_reason,
+
+                                    dni.original_item_qty,
+                                    dni.discount_amount,
+                                    dni.total_orderd,
+                                    dni.cancellation_target,
+                                    dni.returned_amount,
+                                    dni.withdrawn_amount,
+                                    dni.cancelled_amount,
+                                    dni.ops_cancelled_amount,
+                                    expired_amount
+                                    from dns_items_cte dni
+                                    )
+select *,
+case 
+    when (delivery_date = scheduled_delivery_date) and (delivery_hour between delivery_window_start_time and delivery_window_end_time) and status in ('DISPATCHED','DRIVER_CANCELLED','DELIVERED','CASH_COLLECTED','PAID')then 'ON-TIME DELIVERY' 
+    when ((delivery_date > scheduled_delivery_date) or (delivery_date = scheduled_delivery_date and delivery_hour > delivery_window_end_time)) and status in ('DISPATCHED','DRIVER_CANCELLED','DELIVERED','CASH_COLLECTED','PAID')then 'LATE DELIVERY'
+    when ((delivery_date < scheduled_delivery_date) or (delivery_date = scheduled_delivery_date and delivery_hour < delivery_window_start_time)) and status in ('DISPATCHED','DRIVER_CANCELLED','DELIVERED','CASH_COLLECTED','PAID') then 'EARLY DELIVERY'
+    else 'UN-DISPATCHED' 
+end as otif_status 
+from dns_cancellations_with_delivery_hour 
+--where start_time = '2024-10-04 08:00:00' # data validation by Rodgers
+--where status = 'DRIVER_CANCELLED'
+--where item_status = 'ITEM_CANCELLED'
+--where FORMAT_DATE('%Y%m%d', delivery_date) between @DS_START_DATE and @DS_END_DATE
