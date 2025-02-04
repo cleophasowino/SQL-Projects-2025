@@ -1,0 +1,147 @@
+---------------------------- Scheduled Deliveries Report ----------------------------------
+----------------------------- Created By Stacey -------------------------------------------
+----------------Last Updated by Jimmy : 2025-01-30 > Added Zero MD Route Flag---------------
+----------------Last Updated by Cleophas: 2025-02-04> Added Dashboard Access Management-----
+with 
+----------------------------------Uploaded Tables-------------------------------------------------
+regional_mapping as (
+                    select distinct country,
+                    region,
+                    sub_region,
+                    division,
+                    original_territory_id, 
+                    new_territory_id,
+                    from `kyosk-prod.karuru_upload_tables.territory_region_mapping`
+                    ),
+new_categories_item_v2 as (
+                            select distinct product_bundle_id, 
+                            case when company_id = 'KYOSK DIGITAL SERVICES LTD (KE)' then 'KE'
+                                when company_id = 'KYOSK DIGITAL SERVICES LIMITED (TZ)' then 'TZ'
+                                when company_id = 'KYOSK DIGITAL SERVICES LIMITED (UG)' then 'UG'
+                                when company_id = 'KYOSK DIGITAL SOLUTIONS NIGERIA LIMITED ' then 'NG' 
+                            else null end as country_code
+                            from `kyosk-prod.karuru_upload_tables.new_categories_sku`
+                            ), 
+uploaded_zero_md_routes_cte as (
+                                select distinct country_id,
+                                territory_id,
+                                route_id,
+                                route_name,
+                                zero_md_route
+                                from `kyosk-prod.karuru_upload_tables.zero_md_routes` 
+                                where zero_md_route = true
+                                ),
+---------------------------- Fulfilment Centers --------------------
+fulfillment_center as (
+                        select *,
+                        row_number()over(partition by id order by updated_at desc) as index 
+                        from `kyosk-prod.karuru_reports.fulfillment_center` 
+                        where date(created_at) > "2021-06-27" #start date
+                        ),
+fulfillment_center_cte as (
+                            select distinct --date(created_at) created_at,
+                            id,
+                            name,
+                            --country_code,
+                            location.latitude,
+                            location.longitude
+                            from fulfillment_center
+                            where index =1 
+                            ),
+------------------------------ Manage Territory Dashboard Access ---------------------------
+dashboard_users as (
+                    SELECT distinct user_email, 
+                    territory as user_territory
+                    FROM `kyosk-prod.karuru_upload_tables.dashboard_users` 
+  					where active = true
+                    ),
+dashboard_territories as (
+                          SELECT  distinct territory_id, 
+                          territory_lists as user_territory_list
+                          FROM `kyosk-prod.karuru_upload_tables.dashboard_territories`, unnest(territory_lists) as territory_lists
+                          ), 
+dashboard_users_with_territories as (
+                                    select distinct du.user_email,
+                                    du.user_territory,
+                                    dt.user_territory_list
+                                    from dashboard_users du 
+                                    left join dashboard_territories dt on du.user_territory = dt.territory_id
+                                    ),
+----------------------- Promotions Data ----------------------------
+so_and_promo_data as (
+                      select distinct id,
+                      product_bundle_id,
+                      promotion_name
+                      from `karuru_views.sales_order_and_promotions_mashup`
+                      ),
+---------------------------------------------------------------------------------------------------
+delivery_note_with_index as (
+                              select *,                               
+                              row_number()over(partition by id order by updated_at desc ) as index
+                              from `karuru_reports.delivery_notes` 
+                              where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                              and status not in ('EXPIRED','CHANGE_REQUESTED', 'USER_CANCELLED')
+                              and date(created_at) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+                              --and code = 'DN-KHETIA -EIKT-0HETJVR8X2M9D'
+                              ),
+scheduled_deliveries_report as (
+                                select distinct --dnwi.delivery_window.delivery_date as scheduled_delivery_date,
+                                coalesce(dnwi.delivery_window.delivery_date, dnwi.scheduled_delivery_date) as scheduled_delivery_date,
+                                date(dnwi.so_created_date) as so_created_date,
+                                format_date('%A', coalesce(dnwi.delivery_window.delivery_date, dnwi.scheduled_delivery_date)) as scheduled_delivery_day_of_week,
+
+                                dnwi.country_code,
+                                case when fc.name = "Khetia " then 'Khetia' 
+                                     when fc.name = 'Kapa Oil Mahitaji FC' then 'Kapa Oil Mahitaji FC'
+                                else rm.new_territory_id  end as fullfilment_center_name,
+                                rm.region,
+                                rm.sub_region,
+                                rm.division, 
+                                rm.new_territory_id as territory_id,
+                                dnwi.route_name,
+                                case when dnwi.route_id = uzmdr.route_id then 'YES' else 'NO' end as zero_md_route,  
+
+                                dnwi.code as delivery_note,
+                                dnwi.id as delivery_note_id,
+                                dnwi.sale_order_id as sales_order, 
+                                --sr.sales_code,
+                                dnwi.sale_order_code as sales_code,                            	
+                                dnwi.delivery_trip_id,
+                                dnwi.agent_name,
+                                dnwi.status,
+                                dnwi.created_on_app, 
+
+                                dnwi.outlet_id,
+                                dnwi.outlet.name as outlet_name,
+                                dnwi.outlet.phone_number as outlet_phone_number,
+
+                                duwt.user_email,
+                                duwt.user_territory,
+                                
+                                oi.item_group_id,
+                                oi.product_bundle_id,
+                                oi.uom,
+                                oi.status as item_status,
+                                case when oi.product_bundle_id = nci.product_bundle_id then 'New Category'
+                                else 'General Category'
+                                end as sku_category,
+                                oi.product_bundle_id = nci.product_bundle_id as is_new_category,
+                                case when spd.promotion_name is not null then 'YES' else 'NO' end as promo_applied_status,
+                                oi.original_item_qty,
+                                oi.original_item_qty * oi.discount_amount as discount_amount,
+                                oi.total_orderd  - (oi.original_item_qty * oi.discount_amount) as total_ordered,
+                                case
+                                  when dnwi.status in ('PAID','DELIVERED','CASH_COLLECTED') and oi.status = 'ITEM_FULFILLED' then net_total_delivered
+                                else 0 end as gmv_vat_incl
+                                from delivery_note_with_index dnwi,unnest(order_items) oi
+                                left join dashboard_users_with_territories duwt on dnwi.territory_id = duwt.user_territory_list
+                                left join regional_mapping rm on dnwi.territory_id = rm.original_territory_id
+                                left join new_categories_item_v2 as nci on oi.product_bundle_id = nci.product_bundle_id and  dnwi.country_code = nci.country_code
+                                left join fulfillment_center_cte fc on dnwi.fullfilment_center_id = fc.id
+                                left join so_and_promo_data spd on dnwi.sale_order_id = spd.id and oi.product_bundle_id = spd.product_bundle_id
+                                left join uploaded_zero_md_routes_cte uzmdr on dnwi.route_id = uzmdr.route_id
+                                where index = 1
+                                --and REGEXP_CONTAINS(duwt.user_email,@DS_USER_EMAIL)
+                                )
+select * from scheduled_deliveries_report where user_email="victor.njiri@kyosk.app" 
+--where FORMAT_DATE('%Y%m%d', scheduled_delivery_date) between @DS_START_DATE and @DS_END_DATE
