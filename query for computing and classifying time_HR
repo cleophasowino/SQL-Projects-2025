@@ -1,0 +1,10 @@
+SELECT 
+    user_id,
+    entry_time,
+    exit_time,
+    TIMESTAMP_DIFF(exit_time, entry_time, HOUR) AS hours_diff,
+    CASE 
+        WHEN TIMESTAMP_DIFF(exit_time, entry_time, HOUR) >= 9 THEN 'Compliant'
+        ELSE 'Non-Compliant'
+    END AS compliance_status
+FROM your_table;
