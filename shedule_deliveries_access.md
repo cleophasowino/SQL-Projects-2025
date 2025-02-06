@@ -1,7 +1,3 @@
----------------------------- Scheduled Deliveries Report ----------------------------------
------------------------------ Created By Stacey -------------------------------------------
-----------------Last Updated by Jimmy : 2025-01-30 > Added Zero MD Route Flag---------------
-----------------Last Updated by Cleophas: 2025-02-04> Added Dashboard Access Management-----
 with 
 ----------------------------------Uploaded Tables-------------------------------------------------
 regional_mapping as (
@@ -48,25 +44,52 @@ fulfillment_center_cte as (
                             from fulfillment_center
                             where index =1 
                             ),
------------------------------- Manage Territory Dashboard Access ---------------------------
-dashboard_users as (
-                    SELECT distinct user_email, 
-                    territory as user_territory
-                    FROM `kyosk-prod.karuru_upload_tables.dashboard_users` 
-  					where active = true
-                    ),
-dashboard_territories as (
-                          SELECT  distinct territory_id, 
-                          territory_lists as user_territory_list
-                          FROM `kyosk-prod.karuru_upload_tables.dashboard_territories`, unnest(territory_lists) as territory_lists
-                          ), 
-dashboard_users_with_territories as (
-                                    select distinct du.user_email,
-                                    du.user_territory,
-                                    dt.user_territory_list
-                                    from dashboard_users du 
-                                    left join dashboard_territories dt on du.user_territory = dt.territory_id
-                                    ),
+------------------------------ Manage Territory Dashboard Access from erp ---------------------------
+report_users as(
+                            SELECT DISTINCT user_id,
+                            employee_name,
+                            CASE
+                              WHEN LOWER(territory) = LOWER("Ruiru") THEN "Ruiru"
+                              --WHEN LOWER(territory) = LOWER("Juja") THEN "Ruiru"
+                              WHEN LOWER(territory) = LOWER("Ruaka (Kiambu)") THEN "Kiambu"
+                              WHEN LOWER(territory) = LOWER("Eastlands (Choppies)") THEN "Eastlands"
+                              WHEN LOWER(territory) = LOWER("Mombasa (Majengo)") THEN "Majengo Mombasa"
+                              WHEN LOWER(territory) = LOWER("Jos") THEN "Jos-Central"
+                              WHEN LOWER(territory) = LOWER("Uyole") THEN "Uyole"
+                              WHEN LOWER(territory) = LOWER("Kisumu") THEN "Kisumu1"
+                              WHEN LOWER(territory) = LOWER("Igoma") THEN "Igoma"
+                              WHEN LOWER(territory) = LOWER("Ajah") THEN "Ajah"
+                              WHEN LOWER(territory) = LOWER("Embu") THEN "Embu"
+                              WHEN LOWER(territory) = LOWER("Ibadan") THEN "Ibadan_Bodija"
+                              WHEN LOWER(territory) = LOWER("Kawempe") THEN "Kawempe"
+                              WHEN LOWER(territory) = LOWER("Voi") THEN "Voi"
+                              WHEN LOWER(territory) = LOWER("Makindye") THEN "Makindye"
+                              WHEN LOWER(territory) = LOWER("Mwenge") THEN "Mwenge"
+                              WHEN LOWER(territory) = LOWER("Luzira") THEN "Luzira"
+                              WHEN LOWER(territory) = LOWER("Nalukolongo") THEN "Nalukolongo"
+                              WHEN LOWER(territory) = LOWER("Ikeja") THEN "Ikeja"
+                              ELSE NULL
+                            END AS new_territory,
+                            ROW_NUMBER()OVER(PARTITION BY id ORDER BY modified DESC) AS row_num
+                            FROM `kyosk-prod.karuru_reports.employee`
+                            WHERE status = "ACTIVE" AND DATE(creation) >= "2019-01-01"
+),
+report_users_null_territory AS (
+                          SELECT DISTINCT 
+                              user_id,
+                              employee_name,
+                              -- If the new_territory is NULL, assign the predefined list of multiple territories
+                              CASE 
+                                  WHEN new_territory IS NULL 
+                                  THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", 
+                                        "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central", 
+                                        "Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  ELSE [new_territory] -- Keep the assigned territory if not null
+                              END AS new_territory_list
+                          FROM report_users
+                          WHERE row_num =1
+
+),
 ----------------------- Promotions Data ----------------------------
 so_and_promo_data as (
                       select distinct id,
@@ -115,8 +138,8 @@ scheduled_deliveries_report as (
                                 dnwi.outlet.name as outlet_name,
                                 dnwi.outlet.phone_number as outlet_phone_number,
 
-                                duwt.user_email,
-                                duwt.user_territory,
+                                rup.user_id as user_email,
+                                --rup.new_territory_list,
                                 
                                 oi.item_group_id,
                                 oi.product_bundle_id,
@@ -134,7 +157,8 @@ scheduled_deliveries_report as (
                                   when dnwi.status in ('PAID','DELIVERED','CASH_COLLECTED') and oi.status = 'ITEM_FULFILLED' then net_total_delivered
                                 else 0 end as gmv_vat_incl
                                 from delivery_note_with_index dnwi,unnest(order_items) oi
-                                left join dashboard_users_with_territories duwt on dnwi.territory_id = duwt.user_territory_list
+                                JOIN report_users_null_territory rup ON dnwi.territory_id IN UNNEST(rup.new_territory_list)
+                                --left join report_users_null_territory rup on dnwi.territory_id = rup.new_territory
                                 left join regional_mapping rm on dnwi.territory_id = rm.original_territory_id
                                 left join new_categories_item_v2 as nci on oi.product_bundle_id = nci.product_bundle_id and  dnwi.country_code = nci.country_code
                                 left join fulfillment_center_cte fc on dnwi.fullfilment_center_id = fc.id
@@ -143,5 +167,4 @@ scheduled_deliveries_report as (
                                 where index = 1
                                 --and REGEXP_CONTAINS(duwt.user_email,@DS_USER_EMAIL)
                                 )
-select * from scheduled_deliveries_report where user_email="victor.njiri@kyosk.app" 
---where FORMAT_DATE('%Y%m%d', scheduled_delivery_date) between @DS_START_DATE and @DS_END_DATE
+select * from scheduled_deliveries_report WHERE user_email = "judy.ratanya@kyosk.app" 
