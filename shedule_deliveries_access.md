@@ -48,6 +48,7 @@ fulfillment_center_cte as (
 report_users as(
                             SELECT DISTINCT user_id,
                             employee_name,
+                            kyosk_business_unit,
                             CASE
                               WHEN LOWER(territory) = LOWER("Ruiru") THEN "Ruiru"
                               --WHEN LOWER(territory) = LOWER("Juja") THEN "Ruiru"
@@ -80,10 +81,19 @@ report_users_null_territory AS (
                               employee_name,
                               -- If the new_territory is NULL, assign the predefined list of multiple territories
                               CASE 
-                                  WHEN new_territory IS NULL 
-                                  THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", 
-                                        "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central", 
-                                        "Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Audit"THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Finance" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Data & Strategy" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Tech Product" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Tech QA" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Commercial" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Tech Engineering" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Ibadan_Bodija", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Kenya FMCG" THEN ["Ruiru", "Voi","Embu", "Kisumu1","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Kenya Farm & Fresh" THEN ["Ruiru", "Voi","Embu", "Kisumu1","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Tanzania" THEN ["Mwenge","Uyole","Igoma"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Uganda" THEN ["Nalukolongo","Luzira","Kawempe","Makindye"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Nigeria" THEN ["Ikeja","Ibadan_Bodija","Ajah","Jos-Central"]
                                   ELSE [new_territory] -- Keep the assigned territory if not null
                               END AS new_territory_list
                           FROM report_users
@@ -167,4 +177,4 @@ scheduled_deliveries_report as (
                                 where index = 1
                                 --and REGEXP_CONTAINS(duwt.user_email,@DS_USER_EMAIL)
                                 )
-select * from scheduled_deliveries_report WHERE user_email = "judy.ratanya@kyosk.app" 
+select * from scheduled_deliveries_report WHERE user_email = "essam.muhammad@kyosk.app" 
