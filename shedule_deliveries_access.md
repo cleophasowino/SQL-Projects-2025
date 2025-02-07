@@ -99,6 +99,10 @@ report_users_null_territory AS (
                               END AS new_territory_list
                           FROM report_users
                           WHERE row_num =1
+                          UNION ALL
+    -- Hardcoded users access for users not in erp employee table--
+    SELECT "bi.dashboards@kyosk.app" AS user_id, 
+           ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central", "Majengo Mombasa", "Eastlands", "Kiambu", "Bayelsa-Ahodaa", "Abuja-Bwari", "Warri-Effurun", "Ibadan-Bodija"] AS new_territory_list
 
 ),
 ----------------------- Promotions Data ----------------------------
@@ -177,4 +181,4 @@ scheduled_deliveries_report as (
                                 where index = 1
                                 --and REGEXP_CONTAINS(duwt.user_email,@DS_USER_EMAIL)
                                 )
-select * from scheduled_deliveries_report WHERE user_email = "rodgers.nyangweso@kyosk.app" 
+select * from scheduled_deliveries_report WHERE user_email = "bi.dashboards@kyosk.app" 
