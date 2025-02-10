@@ -1,0 +1,125 @@
+-----------------------------------KARURU - KYOSK APP ADOPTION GLOBAL------------------------------
+------------------------------------------CREATED BY Stacey ----------------------------------------
+-----------Last Updated By : Jimmy : 2024-04-10 Added Discount Amount
+with 
+-------------------------------------Uploaded Tables-----------------------------------------------
+territory_region_mapping as (
+                              SELECT distinct country,
+                              region,
+                              sub_region,
+                              division,
+                              original_territory_id, 
+                              new_territory_id,
+                              FROM `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+                              ), 
+fx_rate_conversion as (
+                      select distinct start_date,end_date,company,
+                      case when country_code = 'KE' then 'ke'
+                         when country_code = 'TZ' then 'tz'
+                         when country_code = 'UG' then 'ug'
+                         when country_code = 'NG' then 'ng'
+                         end as country_code,
+                      currency,fx_rate,fx_rate_dfn 
+                      from `karuru_reports.uploaded_karuru_fx_rate_conversion` 
+                      where  fx_rate_dfn ='Budget Rate FY 2024 (Apr. 2023 - March 2024)'
+                      ),
+-------------------------------------------------------------------------------------------------------------
+------------------------------ Manage Territory Dashboard Access from erp ---------------------------
+report_users as(
+                            SELECT DISTINCT user_id,
+                            kyosk_business_unit,
+                            CASE
+                              WHEN LOWER(territory) = LOWER("Ruiru") THEN "Ruiru"
+                              --WHEN LOWER(territory) = LOWER("Juja") THEN "Ruiru"
+                              WHEN LOWER(territory) = LOWER("Ruaka (Kiambu)") THEN "Kiambu"
+                              WHEN LOWER(territory) = LOWER("Eastlands (Choppies)") THEN "Eastlands"
+                              WHEN LOWER(territory) = LOWER("Mombasa (Majengo)") THEN "Majengo Mombasa"
+                              WHEN LOWER(territory) = LOWER("Jos") THEN "Jos-Central"
+                              WHEN LOWER(territory) = LOWER("Uyole") THEN "Uyole"
+                              WHEN LOWER(territory) = LOWER("Kisumu") THEN "Kisumu1"
+                              WHEN LOWER(territory) = LOWER("Igoma") THEN "Igoma"
+                              WHEN LOWER(territory) = LOWER("Ajah") THEN "Ajah"
+                              WHEN LOWER(territory) = LOWER("Embu") THEN "Embu"
+                              WHEN LOWER(territory) = LOWER("Ahoada") THEN "Bayelsa-Ahodaa"
+                              WHEN LOWER(territory) = LOWER("Abuja") THEN "Abuja-Bwari"
+                              WHEN LOWER(territory) = LOWER("Warri") THEN "Warri-Effurun"
+                              WHEN LOWER(territory) = LOWER("Ibadan") THEN "Ibadan-Bodija"
+                              WHEN LOWER(territory) = LOWER("Kawempe") THEN "Kawempe"
+                              WHEN LOWER(territory) = LOWER("Voi") THEN "Voi"
+                              WHEN LOWER(territory) = LOWER("Makindye") THEN "Makindye"
+                              WHEN LOWER(territory) = LOWER("Mwenge") THEN "Mwenge"
+                              WHEN LOWER(territory) = LOWER("Luzira") THEN "Luzira"
+                              WHEN LOWER(territory) = LOWER("Nalukolongo") THEN "Nalukolongo"
+                              WHEN LOWER(territory) = LOWER("Ikeja") THEN "Ikeja"
+                              ELSE NULL
+                            END AS new_territory,
+                            ROW_NUMBER()OVER(PARTITION BY id ORDER BY modified DESC) AS row_num
+                            FROM `kyosk-prod.karuru_reports.employee`
+                            WHERE status = "ACTIVE" AND DATE(creation) >= "2019-01-01"
+),
+report_users_null_territory AS (
+                          SELECT DISTINCT 
+                              user_id,
+                              -- If the new_territory is NULL, assign the predefined list of multiple territories
+                              CASE 
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Audit"THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye","Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu", "Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Finance" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Data & Strategy" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Tech Product" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Tech QA" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Commercial" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Global Tech Engineering" THEN ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye","Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central","Majengo Mombasa", "Eastlands", "Kiambu","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Kenya FMCG" THEN ["Ruiru", "Voi","Embu", "Kisumu1","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Kenya Farm & Fresh" THEN ["Ruiru", "Voi","Embu", "Kisumu1","Majengo Mombasa", "Eastlands", "Kiambu"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Tanzania" THEN ["Mwenge","Uyole","Igoma"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Uganda" THEN ["Nalukolongo","Luzira","Kawempe","Makindye"]
+                                  WHEN new_territory IS NULL AND kyosk_business_unit = "Nigeria" THEN ["Ikeja","Ajah","Jos-Central","Bayelsa-Ahodaa","Abuja-Bwari","Warri-Effurun","Ibadan-Bodija"]
+                                  ELSE [new_territory] -- Keep the assigned territory if not null
+                              END AS new_territory_list
+                          FROM report_users
+                          WHERE row_num =1
+                          UNION ALL
+    -- Hardcoded users access for users not in erp employee table--
+    SELECT "bi.dashboards@kyosk.app" AS user_id, 
+           ["Ruiru", "Ikeja", "Nalukolongo", "Luzira", "Mwenge", "Kawempe", "Voi", "Makindye", "Embu", "Ajah", "Igoma", "Kisumu1", "Uyole", "Jos-Central", "Majengo Mombasa", "Eastlands", "Kiambu", "Bayelsa-Ahodaa", "Abuja-Bwari", "Warri-Effurun", "Ibadan-Bodija"] AS new_territory_list
+
+),
+sales_order_with_index as (
+                            select *,
+                            row_number()over(partition by id order by last_modified_date desc) as index 
+                            FROM `kyosk-prod.karuru_reports.sales_order` 
+                            where date(created_date) >= date_sub(date_trunc(current_date(),month), interval 4 month)
+                            and territory_id not in ('Test UG Territory', 'Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory',
+                            'Test Fresh TZ Territory')
+                            ),
+kyosk_app_report as (
+                    select distinct date(sowi.created_date) as created_date,
+                    sowi.is_pre_karuru,
+                    sowi.id as sales_order_id,
+                    sowi.name as sales_order,
+                    trm.new_territory_id as territory_id,
+                    trm.country,
+                    trm.region,
+                    trm.sub_region,
+                    trm.division,
+                    sowi.outlet.id,
+                    --sowi.order_status,
+                    rup.user_id as user_email,
+                    sowi.created_on_app,
+                    sowi.market_developer_name,
+                    sowi.sales_order_discount as discount_amount,
+                    sowi.total_amount - sowi.sales_order_discount as total,
+                    frc.fx_rate_dfn,
+                    frc.fx_rate,
+                    (sowi.total_amount - sowi.sales_order_discount) / frc.fx_rate as amount_in_usd
+                    from sales_order_with_index sowi
+                    LEFT JOIN report_users_null_territory rup ON sowi.territory_id IN UNNEST(rup.new_territory_list)
+                    left join territory_region_mapping trm on sowi.territory_id = trm.original_territory_id
+                    left join fx_rate_conversion frc on sowi.territory.country_code = frc.country_code and date(sowi.created_date) between frc.start_date and frc.end_date
+                    where index = 1
+                    and sowi.order_status not in ('INITIATED','USER_CANCELLED','EXPIRED')
+                    and sowi.name  not in (select distinct sales_order from `karuru_reports.uploaded_ug_orders_to_delete`)
+                    )
+select * from kyosk_app_report where user_email = "wangechi.luce@kyosk.app"
+--where FORMAT_DATE('%Y%m%d', created_date) between @DS_START_DATE and @DS_END_DATE                           
