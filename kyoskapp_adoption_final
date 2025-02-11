@@ -1,0 +1,68 @@
+-----------------------------------KARURU - KYOSK APP ADOPTION GLOBAL------------------------------
+------------------------------------------CREATED BY Stacey ----------------------------------------
+-----------Last Updated By : Jimmy : 2024-04-10 Added Discount Amount
+with 
+-------------------------------------Uploaded Tables-----------------------------------------------
+territory_region_mapping as (
+                              SELECT distinct country,
+                              region,
+                              sub_region,
+                              division,
+                              original_territory_id, 
+                              new_territory_id,
+                              FROM `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+                              ), 
+fx_rate_conversion as (
+                      select distinct start_date,end_date,company,
+                      case when country_code = 'KE' then 'ke'
+                         when country_code = 'TZ' then 'tz'
+                         when country_code = 'UG' then 'ug'
+                         when country_code = 'NG' then 'ng'
+                         end as country_code,
+                      currency,fx_rate,fx_rate_dfn 
+                      from `karuru_reports.uploaded_karuru_fx_rate_conversion` 
+                      where  fx_rate_dfn ='Budget Rate FY 2024 (Apr. 2023 - March 2024)'
+                      ),
+------------------------------ Manage Territory Dashboard Access from erp ---------------------------
+report_users as( select *,
+                from `kyosk-prod.karuru_views.erp_dashboard_access_mapping`
+                            
+),
+sales_order_with_index as (
+                            select *,
+                            row_number()over(partition by id order by last_modified_date desc) as index 
+                            FROM `kyosk-prod.karuru_reports.sales_order` 
+                            where date(created_date) >= date_sub(date_trunc(current_date(),month), interval 4 month)
+                            and territory_id not in ('Test UG Territory', 'Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory',
+                            'Test Fresh TZ Territory')
+                            ),
+kyosk_app_report as (
+                    select distinct date(sowi.created_date) as created_date,
+                    sowi.is_pre_karuru,
+                    sowi.id as sales_order_id,
+                    sowi.name as sales_order,
+                    trm.new_territory_id as territory_id,
+                    trm.country,
+                    trm.region,
+                    trm.sub_region,
+                    trm.division,
+                    sowi.outlet.id,
+                    --sowi.order_status,
+                    ru.user_id as user_email,
+                    sowi.created_on_app,
+                    sowi.market_developer_name,
+                    sowi.sales_order_discount as discount_amount,
+                    sowi.total_amount - sowi.sales_order_discount as total,
+                    frc.fx_rate_dfn,
+                    frc.fx_rate,
+                    (sowi.total_amount - sowi.sales_order_discount) / frc.fx_rate as amount_in_usd
+                    from sales_order_with_index sowi
+                    LEFT JOIN report_users ru ON sowi.territory_id IN UNNEST(ru.new_territory_list)
+                    left join territory_region_mapping trm on sowi.territory_id = trm.original_territory_id
+                    left join fx_rate_conversion frc on sowi.territory.country_code = frc.country_code and date(sowi.created_date) between frc.start_date and frc.end_date
+                    where index = 1
+                    and sowi.order_status not in ('INITIATED','USER_CANCELLED','EXPIRED')
+                    and sowi.name  not in (select distinct sales_order from `karuru_reports.uploaded_ug_orders_to_delete`)
+                    )
+select * from kyosk_app_report where user_email = "nekesa.rosemary@kyosk.app"
+--where FORMAT_DATE('%Y%m%d', created_date) between @DS_START_DATE and @DS_END_DATE                           
