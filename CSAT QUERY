@@ -1,0 +1,118 @@
+---------------------------------------------------CSAT REPORT-------------------------------------
+--------------------------------------------------CREATED BY STACEY-----------------------------------------
+with 
+--------------------------------- Uploaded Tables -------------------------------------------------
+territory_region_mapping as (
+                              SELECT distinct country,
+                              region,
+                              sub_region,
+                              division,
+                              original_territory_id, 
+                    new_territory_id,
+                              FROM `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+                              ),
+--------------------------------------------------------------------------------------------------
+sw_en_mapping as(
+select *
+from kyosk-prod.csat.improvement_reason_sw_en_mapping
+),
+---------------------------- Outlet Details from DN -------------------------------------------------
+delivery_note_with_index as (
+                              select *,
+                              row_number()over(partition by id order by updated_at desc ) as index
+                              from `karuru_reports.delivery_notes` 
+                              where date(created_at) >= date_sub(date_trunc(current_date(),month), interval 2 month)
+                              and territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory') 
+                            ),
+dn_outlets_data as (
+                select distinct dn.outlet_id,
+                LAST_VALUE(dn.outlet.name) OVER (PARTITION BY dn.outlet_id ORDER BY coalesce(dn.delivery_date,dn.updated_at) ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS outlet_name,
+                --dn.outlet.name as outlet_name,
+                LAST_VALUE(dn.outlet.phone_number) OVER (PARTITION BY dn.outlet_id ORDER BY coalesce(dn.delivery_date,dn.updated_at) ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS outlet_phone_number,
+                --dn.outlet.phone_number as outlet_phone_number,
+                LAST_VALUE(dn.route_name) OVER (PARTITION BY dn.outlet_id ORDER BY coalesce(dn.delivery_date,dn.updated_at) ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS route_name,
+                --dn.route_name
+                from delivery_note_with_index dn
+                where index = 1
+                ),
+--------------------------------- CSAT Data ------------------------------------------
+customer_satisfaction AS (
+                          SELECT DISTINCT timestamp,
+                              document_id,
+                              data,
+                              COALESCE(JSON_EXTRACT_ARRAY(data, "$.improve_on"), []) AS improve_on_list
+                          FROM `kyosk-prod.csat.etl__raw_latest`
+                      ),
+
+flattened_csat AS (
+                        SELECT date(timestamp) as date_created,
+                            cs.document_id,
+                            cs.data,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.country") as country,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.territory") as territory,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.customer_phone") as phone,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.rating") as rating, 
+                            JSON_EXTRACT_SCALAR(im, '$.id') AS question_id,
+                            LOWER(JSON_EXTRACT_SCALAR(im, '$.language')) AS question_language,
+                            JSON_EXTRACT_SCALAR(im, '$.question') AS question_text,
+                            ROW_NUMBER() OVER (PARTITION BY cs.document_id ORDER BY JSON_EXTRACT_SCALAR(im, '$.id')) AS question_index,
+                            JSON_EXTRACT_SCALAR(cs.data, '$.improve_on_additional_comments') AS improve_on_additional_comments,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.reasons_additional_comments") as reasons_additional_comments
+                        FROM customer_satisfaction cs
+                        LEFT JOIN UNNEST(cs.improve_on_list) AS im
+                    ),
+
+translated_questions AS (
+                          SELECT 
+                              fcs.*, 
+                              -- Translate each question based on the id, language, and question_text
+                              CASE  
+                                  WHEN LOWER(fcs.question_language) = LOWER(sem.language) AND LOWER(fcs.question_text) = LOWER(sem.improvement_reason_sw) THEN sem.improvement_reason_en 
+                                  ELSE COALESCE(fcs.question_text, 'No Question Available') 
+                              END AS translated_question
+                          FROM flattened_csat fcs
+                          LEFT JOIN `kyosk-prod.csat.improvement_reason_sw_en_mapping` sem  ON LOWER(fcs.question_language) = LOWER(sem.language) AND LOWER(fcs.question_text) = LOWER(sem.improvement_reason_sw)
+                      ),
+summary_initial as(
+                    SELECT 
+                      date_created,
+                      document_id,
+                      phone,
+                      rating,
+                      territory, 
+                      country,
+                      -- Handling cases where questions may be missing in the improve_on list
+                      MAX(CASE WHEN question_index = 1 THEN translated_question END) AS question_1,
+                      MAX(CASE WHEN question_index = 2 THEN translated_question END) AS question_2,
+                      MAX(CASE WHEN question_index = 3 THEN translated_question END) AS question_3,
+                      MAX(CASE WHEN question_index = 4 THEN translated_question END) AS question_4,
+                      MAX(CASE WHEN question_index = 5 THEN translated_question END) AS question_5,
+                      MAX(CASE WHEN question_index = 6 THEN translated_question END) AS question_6,
+                      MAX(improve_on_additional_comments) AS improve_on_additional_comments,
+                      MAX(reasons_additional_comments) AS reasons_additional_comments
+                  FROM translated_questions --where document_id = 'Ez4o0A3kWCIWsyWi6VLP'
+                  GROUP BY 1,2,3,4,5,6
+                  ),
+summary_final as (
+                  SELECT si.*except(country,territory),
+                  ARRAY_TO_STRING ([IFNULL(question_1, ''), IFNULL(question_2, ''),IFNULL(question_3, ''),IFNULL(question_4, ''),IFNULL(question_5, ''),IFNULL(question_6, '')],
+            ',') as improve_on,
+                  trm.new_territory_id as territory,
+                  trm.country,
+                  trm.division,
+                  trm.region,
+                  dod.outlet_name,
+                  dod.route_name    
+                  from summary_initial si
+                  left join territory_region_mapping trm on si.territory = trm.original_territory_id
+                  left join dn_outlets_data dod on si.phone = dod.outlet_phone_number
+                  where si.territory  not in ('Kyosk HQ','null','Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory')
+                )
+--SELECT * FROM flattened_csat WHERE document_id = '3yQiW5mcEMsL9HJi5vSa'
+
+select * from summary_final where rating not in ('0') and document_id = "mYJyhk8DM80S2j9YRNpz"
+/*SELECT *
+FROM flattened_csat
+WHERE question_text IS NULL*/
+
+
