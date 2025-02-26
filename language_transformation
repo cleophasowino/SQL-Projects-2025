@@ -1,0 +1,124 @@
+---------------------------------------------------CSAT REPORT-------------------------------------
+--------------------------------------------------CREATED BY STACEY-----------------------------------------
+---------------------------------------------------UPDATED BY CLEOPHAS ON 2025-02-19: SWAHILI RESPONSES------
+---------------------------------------------------UPDATED BY CLEOPHAS ON 2025-02-21: ADDED ZERO MD FLAG
+with 
+--------------------------------- Uploaded Tables -------------------------------------------------
+territory_region_mapping as (
+                              SELECT distinct country,
+                              region,
+                              sub_region,
+                              division,
+                              original_territory_id, 
+                    new_territory_id,
+                              FROM `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+                              ),
+--------------------------------------------------------------------------------------------------
+sw_en_mapping as(
+                      select language, improvement_reason_en,improvement_reason_sw
+                      from `kyosk-prod.karuru_upload_tables.improvement_reason_mapping`
+                      ),
+----------------------------Routes----------------------------------------------
+routes as (
+                                SELECT distinct country_id,
+                                territory_id,
+                                route_id,
+                                route_name,
+                                zero_md_route,
+                                created_on_app
+                                FROM `kyosk-prod.karuru_upload_tables.zero_md_routes` zmd,unnest(['Duka App','AgentApp']) created_on_app
+
+),
+---------------------------- Outlet Details from DN -------------------------------------------------
+delivery_note_with_index as (
+                              select *,
+                              row_number()over(partition by id order by updated_at desc ) as index
+                              from `karuru_reports.delivery_notes` 
+                              where date(created_at) >= date_sub(date_trunc(current_date(),month), interval 2 month)
+                              and territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory') 
+                            ),
+dn_outlets_data as (
+                select distinct dn.outlet_id,
+                LAST_VALUE(dn.outlet.name) OVER (PARTITION BY dn.outlet_id ORDER BY coalesce(dn.delivery_date,dn.updated_at) ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS outlet_name,
+                LAST_VALUE(dn.outlet.phone_number) OVER (PARTITION BY dn.outlet_id ORDER BY coalesce(dn.delivery_date,dn.updated_at) ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS outlet_phone_number,
+                LAST_VALUE(dn.route_name) OVER (PARTITION BY dn.outlet_id ORDER BY coalesce(dn.delivery_date,dn.updated_at) ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS route_name,
+                LAST_VALUE(dn.route_id) OVER (PARTITION BY dn.outlet_id ORDER BY coalesce(dn.delivery_date,dn.updated_at) ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS route_id,
+                from delivery_note_with_index dn
+                where index = 1
+                ),
+--------------------------------- CSAT Data ------------------------------------------
+customer_satisfaction AS (
+                          SELECT DISTINCT timestamp,
+                              document_id,
+                              data,
+                              COALESCE(JSON_EXTRACT_ARRAY(data, "$.improve_on"), []) AS improve_on_list
+                          FROM `kyosk-prod.csat.etl__raw_latest`
+                      ),
+
+flattened_csat AS (
+                        SELECT date(timestamp) as date_created,
+                            cs.document_id,
+                            cs.data,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.country") as country,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.territory") as territory,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.customer_phone") as phone,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.rating") as rating, 
+                            JSON_EXTRACT_SCALAR(im, '$.id') AS question_id,
+                            LOWER(JSON_EXTRACT_SCALAR(im, '$.language')) AS question_language,
+                            JSON_EXTRACT_SCALAR(im, '$.question') AS question_text,
+                            ROW_NUMBER() OVER (PARTITION BY cs.document_id ORDER BY JSON_EXTRACT_SCALAR(im, '$.id')) AS question_index,
+                            JSON_EXTRACT_SCALAR(cs.data, '$.improve_on_additional_comments') AS improve_on_additional_comments,
+                            JSON_EXTRACT_SCALAR(cs.data, "$.reasons_additional_comments") as reasons_additional_comments
+                        FROM customer_satisfaction cs
+                        LEFT JOIN UNNEST(cs.improve_on_list) AS im
+                    ),
+
+translated_questions AS (
+                             SELECT 
+        fcs.*, 
+        fcs.question_text AS original_question,
+        CASE  
+            WHEN LOWER(fcs.question_language) = LOWER(sem.language) AND LOWER(fcs.question_text) = LOWER(sem.improvement_reason_sw) THEN sem.improvement_reason_en 
+            ELSE fcs.question_text 
+        END AS translated_question,
+        CASE  
+            WHEN LOWER(fcs.question_language) = LOWER(sem.language) AND LOWER(fcs.question_text) = LOWER(sem.improvement_reason_sw) THEN "Translated" 
+            ELSE "Original" 
+        END AS translation_status
+    FROM flattened_csat fcs
+    LEFT JOIN sw_en_mapping sem ON LOWER(fcs.question_language) = LOWER(sem.language) AND LOWER(fcs.question_text) = LOWER(sem.improvement_reason_sw)
+                      ),
+improve_on_nested as (
+                select document_id, array_to_string(array_agg(ifnull(translated_question, '')), ' , ') as improve_on
+                from translated_questions
+                group by document_id
+                ),
+summary_final as (
+                select date_created,
+                tq.document_id,
+                phone,
+                cast(rating as int64) as rating,
+                trm.new_territory_id as territory,
+                trm.country,
+                dod.outlet_name,
+                dod.route_name,
+                translated_question,
+                improve_on_additional_comments,
+                reasons_additional_comments,
+                ion.improve_on,
+                case when ifnull(translated_question, '') = ifnull(question_text,'') then "Not Translated"
+                else "Translated"
+                end as translation_status,
+                tq.question_text,
+                r.zero_md_route
+                from translated_questions tq
+                left join territory_region_mapping trm on tq.territory = trm.original_territory_id
+                left join dn_outlets_data dod on tq.phone = dod.outlet_phone_number
+                left join routes r on dod.route_id = r.route_id
+                left join improve_on_nested ion on tq.document_id = ion.document_id
+                where tq.territory  not in ('Kyosk HQ','null','Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory')
+                )
+
+select * from summary_final
+
+where rating != 0 --and FORMAT_DATE('%Y%m%d',date_created ) between @DS_START_DATE and @DS_END_DATE
