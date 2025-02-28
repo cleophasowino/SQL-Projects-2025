@@ -1,0 +1,124 @@
+with
+territory_region_mapping as(
+                            select territory as territory_id,
+                            company,
+                            country,
+                            country_code
+                          from `kyosk-prod.karuru_reports.uploaded_karuru_regional_mapping`
+                          where territory not in ('Kyosk TZ HQ','Vingunguti','Themi','Test TZ Territory','Mukono','Test UG Territory','Kyosk HQ', 'Test KE Territory','Kano-Sabongari','Kano-Zoo','Nassarawa-Karu','Surulere','Okota','Ilorin-Main','PortHarcourt-Obiakpor','Benin-Central','Test NG Territory','Mtwapa Mombasa','Juja','Thika Rd','Ruai','Athi River','Kawangware','Ongata Rongai','Karatina','Meru','Nakuru','Eldoret', 'Kisii')
+),
+-- Fulfillment Center Filtered
+fulfillment_center_cte AS (
+    SELECT DISTINCT
+        id,
+        name,
+        location.latitude,
+        location.longitude
+    FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC) AS row_num
+        FROM `kyosk-prod.karuru_reports.fulfillment_center`
+        WHERE DATE(created_at) > '2021-06-27'
+    )
+    WHERE row_num = 1),
+sale_orders as(
+                            SELECT *,
+                            ROW_NUMBER()OVER(PARTITION BY id ORDER BY last_modified_date) AS index
+                            FROM `kyosk-prod.karuru_reports.sales_order` 
+                            WHERE DATE(created_date) >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH),INTERVAL 3 MONTH)
+                          ),
+sale_orders_items as(
+                            SELECT DISTINCT so.created_date,
+                            so.id as sales_order_id,
+                            so.name as sales_order,
+                            so.order_status,
+                            so.outlet_id,
+                            so.territory_id as territory,
+                            so.total_amount as total_order_amount,
+                            so.sales_order_discount,
+                            so.total_amount - sales_order_discount as order_value,
+                            so.created_on_app,
+                            so.created_by,
+                            so.route_id,
+                            so.market_developer_name,
+                            so.market_developer_email,
+                            so.is_credit_sale,
+
+                            oi.product_bundle_id,
+                            oi.selling_price,
+                            oi.total as product_bundle_amount,
+                            oi.category_id as item_group_id,
+                            oi.catalog_item_qty,
+                            oi.uom,
+                            oi.currency
+                            FROM sale_orders so, unnest(so.items) oi
+                            where index = 1
+                            --and created_date between '2025-02-26' and '2024-11-01'
+),
+delivery_notes_with_index as (
+                            SELECT *,
+                            ROW_NUMBER()OVER(PARTITION BY id ORDER BY updated_at) as index
+                            FROM `kyosk-prod.karuru_reports.delivery_notes`
+                            WHERE DATE(created_at) >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 3 MONTH)
+                            and territory_id not in ('Kyosk TZ HQ','Vingunguti','Themi','Test TZ Territory','Mukono','Test UG Territory','Kyosk HQ', 'Test KE Territory','Kano-Sabongari','Kano-Zoo','Nassarawa-Karu','Surulere','Okota','Ilorin-Main','PortHarcourt-Obiakpor','Benin-Central','Test NG Territory','Mtwapa Mombasa','Juja','Thika Rd','Ruai','Athi River','Kawangware','Ongata Rongai','Karatina','Meru','Nakuru','Eldoret', 'Kisii')
+),
+delivery_notes as(
+                            SELECT DISTINCT dnwi.created_at,
+                            dnwi.id as delivery_note_id,
+                            dnwi.code as delivery_note_code,
+                            dnwi.is_reschedule,
+                            dnwi.delivery_trip_id,
+                            dnwi.driver_id,
+                            fcc.name as fulfillment_center,
+                            trm.territory_id,
+                            dnwi.country_code,
+                            dnwi.currency,
+                            dnwi.amount as delivery_note_amount,
+                            dnwi.status,
+                            dnwi.so_cancellation_reason,
+                            dnwi.sale_order_id,
+                            dnwi.route_name,
+
+                            dnoi.product_bundle_id,
+                            dnoi.qty_delivered,
+                            dnoi.discount_amount as delivered_discount,
+                            dnoi.total_delivered,
+                            dnoi.status as order_item_status
+                            FROM delivery_notes_with_index dnwi, unnest(dnwi.order_items) dnoi
+                            LEFT JOIN territory_region_mapping trm on dnwi.territory_id = trm.territory_id
+                            LEFT JOIN fulfillment_center_cte fcc on dnwi.fullfilment_center_id = fcc.id
+                            WHERE index =1
+                            --and created_at between '2025-02-26' and '2024-11-01'
+),
+final_cte as (
+                          select distinct date(soi.created_date) as creation_date,
+                          dn.country_code,
+                          soi.territory as so_territory,
+                          dn.delivery_note_code,
+                          soi.sales_order,
+                          soi.product_bundle_amount as ordered_amount,
+                          soi.catalog_item_qty as ordered_qty, 
+                          soi.order_status as sales_order_status,
+                          soi.market_developer_name,
+                          soi.product_bundle_id,
+                          soi.selling_price,
+                          soi.sales_order_discount,
+                          soi.sales_order_discount * catalog_item_qty as total_discount,
+                          soi.item_group_id as item_group_type,
+                          (soi.product_bundle_amount - (soi.sales_order_discount * catalog_item_qty)) as order_value,
+
+                          dn.qty_delivered,
+                          dn.delivered_discount as dn_discount_amount,
+                          dn.delivery_note_amount as amount_delivered,
+                          dn.status as delivery_note_status,
+                          dn.so_cancellation_reason,
+                          dn.currency,
+                          dn.fulfillment_center,
+                          dn.territory_id as dn_territory,
+                          dn.route_name
+                          from delivery_notes dn
+                          left join sale_orders_items soi on dn.sale_order_id = soi.sales_order_id and dn.product_bundle_id = soi.product_bundle_id
+                          --where created_date between '2025-02-26' and '2024-11-01'
+)
+select distinct sales_order, creation_date, format_date('%B %Y', creation_date) as month_year,market_developer_name,product_bundle_id as product_bundle, item_group_type,selling_price, ordered_qty,sales_order_discount,order_value, fulfillment_center, so_territory as territory, route_name from final_cte where so_territory = 'Ruiru' --and sales_order = 'SOMVYMC2025' 
+order by creation_date desc
