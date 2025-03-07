@@ -1,0 +1,456 @@
+WITH 
+-------------------------------Uploaded Tables-----------------------------------
+regional_mapping AS (
+    SELECT DISTINCT country,
+                    region,
+                    sub_region,
+                    division,
+                    original_territory_id,
+                    new_territory_id
+    FROM `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+),
+cancellation_reason_matrix as (
+                              select distinct cancellation_type,
+                              cancellation_reason,
+                              paid_in_full_denominator
+                              from `kyosk-prod.karuru_upload_tables.cancellation_type_and_reason_matrix` 
+                              ),
+------------------- Uploaded - Delivery Windows ---------------------------------------
+uploaded_delivery_window_v1 as (
+                                SELECT distinct id,
+                                safe_cast(start_time as int64) as start_time,
+                                safe_cast(end_time as int64) as end_time
+                                FROM `kyosk-prod.karuru_upload_tables.delivery_window_v1` 
+                                ),
+uploaded_delivery_window_v2 as (
+                                SELECT distinct id,
+                                safe_cast(delivery_window_start_time_hours as int64) as delivery_window_start_time_hours,
+                                safe_cast(delivery_window_end_time_hours as int64) as delivery_window_end_time_hours
+                                FROM `kyosk-prod.karuru_upload_tables.delivery_window_v2` 
+                                ),
+uploaded_delivery_window_v3 as (
+                                SELECT distinct id,
+                                safe_cast(start_time_hours as int64) as start_time_hours,
+                                safe_cast(end_time_hours as int64) as end_time_hours
+                                --delivery_window_end_time_hours 
+                                FROM `kyosk-prod.karuru_upload_tables.delivery_window_v3` 
+                                ),
+---------------------------Items where dn_items is null-----------------------
+items_with_index as (
+                  select *,
+                  row_number()over(partition by id order by modified desc ) as index
+                  FROM `kyosk-prod.karuru_reports.item` 
+                  where date(creation) >= '2020-01-01'
+),
+items_cte as (
+            select distinct id, stock_uom,
+            FIRST_VALUE(iwi.item_group_id) OVER (PARTITION BY id ORDER BY modified DESC) AS item_group_id
+            from items_with_index iwi
+            where index = 1
+),
+----------------------- delivery window v3 -----------------------------
+delivery_window_v3 as (
+                        SELECT *,
+                        row_number()over(partition by id order by updated_at desc) as index
+                        FROM `kyosk-prod.karuru_reports.delivery_window_v3` 
+                        WHERE TIMESTAMP_TRUNC(created_at, DAY) > TIMESTAMP("2024-01-01")
+                        ),
+delivery_window_v3_cte as (
+                            select distinct created_at,
+                            --updated_at,
+                            --bq_upload_time,
+                            id,
+                            --delivery_window_config_id,
+                            available,
+                            --route_cluster_id,
+                            cut_off_time,
+                            start_time,
+                            end_time
+                            from delivery_window_v3
+                            where index = 1
+                            ),
+---------------------------- Fulfilment Centers --------------------
+fulfillment_center as (
+                        SELECT *,
+                        row_number()over(partition by id order by updated_at desc) as index 
+                        FROM `kyosk-prod.karuru_reports.fulfillment_center` 
+                        WHERE date(created_at) > "2021-06-27" #start date
+                        ),
+fulfillment_center_cte as (
+                            select distinct --date(created_at) created_at,
+                            id,
+                            name,
+                            --country_code,
+                            location.latitude,
+                            location.longitude
+                            from fulfillment_center
+                            where index =1 
+                            ),
+--------------------------------Date Parameter Dfn----------------------------------------------------------------------------
+date_array as (
+    select * 
+    from unnest(generate_date_array(date_sub(date_trunc(current_date(), week), interval 4 week), date_sub(date_trunc(current_date(), week), interval 1 DAY), interval 1 day)) as my_date
+ ),
+rolling_weeks as (
+   select count(distinct my_date) as calendar_days, 
+    count(distinct case when format_date('%A', my_date) not in ('Sunday') then my_date end) as days_in_period
+    from date_array
+                ),
+---------------------- Sales Order Data -----------------------------
+so_with_index as (
+                      select *,
+                      row_number()over(partition by id  order by last_modified_date desc) as index
+                      from `kyosk-prod.karuru_reports.sales_order` 
+                      where date(created_date) >= date_sub(current_date, interval 2 month)
+                      and territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                      and order_status not in ('INITIATED')
+                      ),
+so_items_cte as (
+                select distinct so.created_date,
+                rm.new_territory_id as territory_id,
+                so.id,
+                so.name,
+                so.order_status,
+                i.product_bundle_id,
+                i.category_id,
+                i.uom,
+                i.fulfilment_status,
+                i.net_total,
+                i.catalog_item_qty,
+                ii.stock_item_id
+                from so_with_index so, unnest(items) i, unnest(inventory_items) ii
+                left join regional_mapping rm on so.territory_id = rm.original_territory_id
+                where index = 1
+                ),
+---------------------- Delivery Note Data ---------------------------
+delivery_notes_with_index as (
+                              select *,
+                              row_number()over(partition by id order by updated_at desc) as index
+                              from `kyosk-prod.karuru_reports.delivery_notes`
+                              where territory_id not in ('Test UG Territory', 'Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test Fresh TZ Territory') 
+                              and date(created_at) >= date_sub(date_trunc(current_date(), month), interval 2 month)
+                              ),
+delivery_notes_data as (
+                        select distinct coalesce(date(delivery_date), date(updated_at)) as delivery_date,
+                        dn.delivery_window_id,
+                        coalesce(dn.scheduled_delivery_date, dn.delivery_window.delivery_date) as scheduled_delivery_date,
+                        
+                        safe_cast(dn.delivery_window.start_time as int64) as dn_delivery_window_start_time,
+                        safe_cast(dn.delivery_window.end_time as int64) as dn_delivery_window_end_time,
+                        
+                        case 
+                          when dn.country_code in ('TZ','KE','UG') then date_add(coalesce(delivery_date,updated_at), interval 3 hour)
+                          when dn.country_code in ('NG') then date_add(coalesce(delivery_date,updated_at), interval 1 hour)
+                        else dn.delivery_date end as delivery_date_in_local,
+                        dn.country_code,
+                        rm.country,
+                        rm.new_territory_id as territory_id,
+                        dn.fullfilment_center_id,
+                        case when fc.name = "Khetia " then 'Khetia' 
+                              when fc.name = 'Kapa Oil Mahitaji FC' then 'Kapa Oil Mahitaji FC'
+                        else rm.new_territory_id  end as fullfilment_center_name,
+
+                        dn.outlet_id,
+                        dn.id,
+                        dn.code,
+                        dn.status,
+                        
+                        dn.sale_order_id,
+                        ic.stock_uom,
+
+                  
+                        ii.stock_item_id,
+                        oi.product_bundle_id,
+                        coalesce(nullif(oi.item_group_id, ' '), ic.item_group_id) as item_group_id,
+                        oi.status as item_status,
+                        oi.cancellation_reason,
+                        so_cancellation_reason,
+                        oi.original_item_qty,
+                        oi.qty_delivered,
+                        oi.total_orderd - (oi.original_item_qty * oi.discount_amount) as total_orderd,
+                        oi.total_delivered - (oi.qty_delivered * oi.discount_amount) as total_delivered,
+                        from delivery_notes_with_index dn
+                        left join unnest(order_items) oi
+                        left join unnest(inventory_items) ii
+                        left join regional_mapping  rm on dn.territory_id = rm.original_territory_id
+                        left join fulfillment_center_cte fc on dn.fullfilment_center_id = fc.id
+                        left join items_cte ic on oi.product_bundle_id = ic.id
+                        where index = 1      
+                        ),
+delivery_notes_and_so_data_mashup as (
+                                      select distinct sic.created_date as so_created_date,
+                                      sic.name as sale_order,
+                                      sic.order_status as so_order_status,
+                                      sic.id as so_id,
+                                      dn.sale_order_id,
+                                      
+                                      dn.delivery_date,
+                                      dn.delivery_window_id,
+                                      dn.scheduled_delivery_date,
+                                      
+                                      dn.dn_delivery_window_start_time,
+                                      dn.dn_delivery_window_end_time,
+                                      
+                                      dn.delivery_date_in_local,
+                                      dn.country_code,
+                                      dn.country,
+                                      dn.territory_id,
+                                      dn.fullfilment_center_id,
+                                      dn.fullfilment_center_name,
+
+                                      dn.outlet_id,
+                                      dn.id,
+                                      dn.code,
+                                      dn.status,
+                                      dn.stock_uom,
+
+                                      
+                                     
+                                      --dn.stock_item_id,
+                                      sic.fulfilment_status,
+
+
+                                      dn.stock_item_id,
+                                      dn.item_group_id,
+                                      dn.product_bundle_id,
+                                      dn.item_status,
+                                      coalesce(NULLIF(dn.cancellation_reason,''),dn.so_cancellation_reason) as cancellation_reason,
+                                      --dn.total_orderd,
+                                      sic.net_total as total_orderd,
+                                      sic.catalog_item_qty,
+                                      --dn.item_group_id,
+
+                                      case 
+                                        when dn.item_status = 'ITEM_CANCELLED' and dn.cancellation_reason = '' then sic.net_total else 0 
+                                      end as withdrawn_amount,
+                                      case 
+                                        when dn.item_status = 'ITEM_OPS_CANCELLED'  then sic.net_total else 0 
+                                      end as ops_cancelled_amount,
+                                      case 
+                                        when dn.item_status = 'ITEM_CANCELLED' and (dn.cancellation_reason <> '') then sic.net_total else 0 
+                                      end as returned_amount,
+                                      case 
+                                        when dn.status = 'EXPIRED' then sic.net_total else 0 
+                                      end as expired_amount,
+                                      case 
+                                        when dn.item_status in ('ITEM_OPS_CANCELLED','ITEM_CANCELLED','ITEM_REMOVED','ITEM_WITHDRAWN') and dn.cancellation_reason in ('OUT_OF_STOCK', 'EXCEEDED_DISPATCH_COST', 'INSUFFICIENT_FLEET','INACCESSIBLE_VIA_ROAD') then sic.catalog_item_qty
+                                       else dn.qty_delivered
+                                      end as expected_delivery_qty,
+
+                                      case when dn.status in ('PAID','DELIVERED','CASH_COLLECTED') and dn.item_status = 'ITEM_FULFILLED' then dn.total_delivered else 0 end as delivered_amount,
+                                      case when dn.status in ('PAID','DELIVERED','CASH_COLLECTED') and dn.item_status = 'ITEM_FULFILLED' then dn.qty_delivered else 0 end as qty_delivered,
+                                      from so_items_cte sic 
+                                      left join delivery_notes_data dn on sic.id = dn.sale_order_id and sic.stock_item_id = dn.stock_item_id 
+                                      ),
+
+------------------------ Delivery Notes , Delivery Windows --------------------------
+dns_with_delivery_windows_cte as (
+                                    select distinct dn.country_code,
+                                    coalesce(dn.country,LAST_VALUE(dn.country) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as country,
+                                    coalesce(dn.territory_id,LAST_VALUE(dn.territory_id) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as territory_id,
+                                    
+                                    coalesce(dn.scheduled_delivery_date,LAST_VALUE(dn.scheduled_delivery_date) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as scheduled_delivery_date,
+                                    coalesce(dn.delivery_date,LAST_VALUE(dn.delivery_date) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as delivery_date,
+                                    coalesce(dn.delivery_date_in_local,LAST_VALUE(dn.delivery_date_in_local) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as delivery_date_in_local,
+                                    EXTRACT(HOUR FROM delivery_date_in_local) as delivery_hour,
+
+                                    dn.delivery_window_id,
+                                    dwv3.available,
+                                    case
+                                      when dn.country_code in ('TZ','KE','UG') then date_add(dwv3.start_time, interval 3 hour)
+                                      when dn.country_code in  ('NG') then date_add(dwv3.start_time, interval 1 hour)
+                                    else dwv3.start_time end as delivery_window_v3_local_start_time,
+                                    case
+                                      when dn.country_code in ('TZ','KE','UG') then date_add(dwv3.end_time, interval 3 hour)
+                                      when dn.country_code in  ('NG') then date_add(dwv3.end_time, interval 1 hour)
+                                    else dwv3.end_time  end as delivery_window_v3_local_end_time,
+
+                                    dn.dn_delivery_window_start_time,
+                                    dn.dn_delivery_window_end_time,
+                                    udwv1.start_time as uploaded_delivery_window_v1_start_time,
+                                    udwv1.end_time as uploaded_delivery_window_v1_end_time,
+
+                                    udwv2.delivery_window_start_time_hours as uploaded_delivery_window_v2_start_time,
+                                    udwv2.delivery_window_end_time_hours as uploaded_delivery_window_v2_end_time,
+
+                                    udwv3.start_time_hours as uploaded_delivery_window_v3_start_time,
+                                    udwv3.end_time_hours as uploaded_delivery_window_v3_end_time,
+
+                                    coalesce(dn.fullfilment_center_name,LAST_VALUE(dn.fullfilment_center_name) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as fullfilment_center_name,
+                                    --dn.fullfilment_center_name,
+
+                              
+                                    --dn.driver_name,
+
+                                    dn.outlet_id,
+                                    coalesce(dn.id,LAST_VALUE(dn.id) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as id,
+                                    coalesce(dn.code,LAST_VALUE(dn.code) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as code,
+                                    coalesce(dn.status,LAST_VALUE(dn.status) OVER (PARTITION BY dn.sale_order ORDER BY dn.sale_order ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) as status,
+
+                                    dn.so_created_date,
+                                    dn.sale_order,
+                                    dn.so_order_status,
+                                    dn.sale_order_id,
+
+                                    dn.stock_item_id,
+                                    dn.item_group_id,
+                                    dn.stock_uom,
+                                    dn.fulfilment_status,
+                                    dn.item_status,
+                                    dn.cancellation_reason,
+                                    case when dn.returned_amount > 0 then 'RETURNS'
+                                         when dn.withdrawn_amount > 0 then 'WITHDRAWN'
+                                         when dn.ops_cancelled_amount > 0 then 'OPS CANCELLED'
+                                    else null end as cancellation_type,
+                                    dn.total_orderd,
+                                    dn.catalog_item_qty,
+                                    
+                                    dn.withdrawn_amount,
+                                    dn.ops_cancelled_amount,
+                                    dn.returned_amount,
+                                    dn.expired_amount,
+
+                                    dn.expected_delivery_qty,
+
+                                    dn.qty_delivered,
+                                    dn.delivered_amount,
+                                
+                                    
+                                    from delivery_notes_and_so_data_mashup dn
+                                    left join delivery_window_v3_cte dwv3 on dn.delivery_window_id = dwv3.id
+                                    left join uploaded_delivery_window_v1 udwv1 on dn.delivery_window_id = udwv1.id
+                                    left join uploaded_delivery_window_v2 udwv2 on dn.delivery_window_id = udwv2.id
+                                    left join uploaded_delivery_window_v3 udwv3 on dn.delivery_window_id = udwv3.id
+                                    ),
+updated_dns_with_delivery_window_v3 as (
+                                        select distinct 
+                                        dwdw.delivery_date,
+                                        dwdw.delivery_date_in_local,
+                                        case when dwdw.delivery_hour = 0 then 24 else dwdw.delivery_hour end as delivery_hour,
+
+                                        dwdw.country_code,
+                                        dwdw.country,
+                                        dwdw.territory_id,
+                                        dwdw.fullfilment_center_name,
+
+                                        dwdw.id,
+                                        dwdw.code,
+                                        dwdw.status,
+
+                                        dwdw.sale_order,
+                                        dwdw.so_order_status,
+                                        dwdw.sale_order_id,
+
+                                        dwdw.delivery_window_id,
+                                        dwdw.scheduled_delivery_date,
+
+
+                                        coalesce(
+                                          EXTRACT(HOUR FROM dwdw.delivery_window_v3_local_start_time), 
+                                          dwdw.dn_delivery_window_start_time,
+                                          dwdw.uploaded_delivery_window_v3_start_time, 
+                                          dwdw.uploaded_delivery_window_v1_start_time, 
+                                          dwdw.uploaded_delivery_window_v2_start_time
+                                          ) as delivery_window_start_hour,
+                                        coalesce(
+                                          EXTRACT(HOUR FROM dwdw.delivery_window_v3_local_end_time), 
+                                          dwdw.dn_delivery_window_end_time,
+                                          dwdw.uploaded_delivery_window_v3_end_time, 
+                                          dwdw.uploaded_delivery_window_v1_end_time, 
+                                          dwdw.uploaded_delivery_window_v2_end_time
+                                          ) as delivery_window_end_hour,
+
+                                        dwdw.outlet_id,
+
+                                        dwdw.stock_item_id,
+                                        dwdw.stock_uom,
+                                        dwdw.item_group_id,
+                                        dwdw.fulfilment_status,
+                                        dwdw.item_status,
+                                        dwdw.cancellation_reason,
+                                        dwdw.cancellation_type,
+                                        dwdw.total_orderd,
+                                        dwdw.catalog_item_qty,
+                                        
+                                        dwdw.withdrawn_amount,
+                                        dwdw.ops_cancelled_amount,
+                                        dwdw.returned_amount,
+                                        dwdw.expired_amount,
+
+                                        dwdw.expected_delivery_qty,
+
+                                        dwdw.qty_delivered,
+                                        dwdw.delivered_amount,
+
+                                        from dns_with_delivery_windows_cte dwdw
+                                        
+                                        ),
+define_on_time_delivery as (
+                            select udwd.*,
+                            case 
+                              when (udwd.delivery_date = udwd.scheduled_delivery_date) and (udwd.delivery_hour between udwd.delivery_window_start_hour and udwd.delivery_window_end_hour) then 'ON-TIME DELIVERY' 
+                              when (udwd.delivery_date > udwd.scheduled_delivery_date) or (udwd.delivery_date = udwd.scheduled_delivery_date and udwd.delivery_hour > udwd.delivery_window_end_hour) then 'LATE DELIVERY'
+                              when (udwd.delivery_date < udwd.scheduled_delivery_date) or (udwd.delivery_date = udwd.scheduled_delivery_date and udwd.delivery_hour < udwd.delivery_window_start_hour)  then 'EARLY DELIVERY'
+                            else 'UNSET' end as on_time_status,
+                            from updated_dns_with_delivery_window_v3 udwd
+                            ),
+define_in_full_delivery as (
+                            select dotd.*,
+                            crm.paid_in_full_denominator,
+                            case when dotd.cancellation_type = 'WITHDRAWN' and crm.paid_in_full_denominator = 'No' then 0
+                                 when dotd.cancellation_type = 'OPS CANCELLED' and crm.paid_in_full_denominator = 'Yes' then ops_cancelled_amount
+                                 when dotd.cancellation_type = 'OPS CANCELLED' and crm.paid_in_full_denominator = 'No' then 0
+                                 when dotd.cancellation_type = 'RETURNS' and crm.paid_in_full_denominator = 'Yes' then returned_amount
+                                 when dotd.cancellation_type = 'RETURNS' and crm.paid_in_full_denominator = 'No' then 0
+                                 when dotd.cancellation_type = 'RETURNS' and crm.paid_in_full_denominator = "If Late Delivery then Yes, otherwise No" and dotd.on_time_status  = 'LATE DELIVERY' then returned_amount
+                                 when dotd.cancellation_type = 'RETURNS' and crm.paid_in_full_denominator = "If Late Delivery then Yes, otherwise No" and dotd.on_time_status  <> 'LATE DELIVERY' then 0
+                            else total_orderd end as in_full_denominator_amount,
+                            from define_on_time_delivery dotd
+                            left join cancellation_reason_matrix crm on dotd.cancellation_type = crm.cancellation_type and dotd.cancellation_reason = crm.cancellation_reason
+
+                            ),
+--------------------Mashup--------------------
+mashup_with_inventory as (
+                              select *except(delivery_date_in_local,delivery_hour,id,code,sale_order,delivery_window_id,delivery_window_start_hour,delivery_window_end_hour,outlet_id,cancellation_type,paid_in_full_denominator,scheduled_delivery_date,fulfilment_status),
+                            case when difd.item_status in ('ITEM_CANCELLED','ITEM_DISPATCHED','ITEM_RESCHEDULED',  'ITEM_PENDING') and difd.on_time_status in ('LATE DELIVERY','EARLY DELIVERY','ON-TIME DELIVERY') then catalog_item_qty else expected_delivery_qty end as in_full_denominator_qty 
+                              from define_in_full_delivery difd
+                              --where stock_item_id is null
+
+),
+initial_mashup as (
+                  select distinct delivery_date,
+                  im.country,
+                  im.country_code,
+                  im.territory_id as territory,
+                  im.item_group_id,
+                  im.stock_item_id,
+                  im.stock_uom, 
+
+                  rw.days_in_period,
+                  sum(im.in_full_denominator_qty) as demand_on_period,
+
+                  round(sum(im.in_full_denominator_qty)/rw.days_in_period,3) as daily_demand_qty,
+                  round(sum(im.in_full_denominator_amount)/rw.days_in_period,2) as daily_demand_amount,
+
+                  round(sum(im.in_full_denominator_qty)/rw.days_in_period,3) * 6 as weekly_demand_qty,
+                  round(sum(im.in_full_denominator_amount)/rw.days_in_period,2)  * 6 as weekly_demand_amount
+
+                  from mashup_with_inventory im
+                  cross join rolling_weeks rw
+                  group by 1,2,3,4,5,6,7,8
+),
+                    
+dates as (
+  SELECT * 
+  FROM  UNNEST(GENERATE_DATE_ARRAY('2022-03-01',date_add(CURRENT_DATE(),interval 1 day), INTERVAL 1 DAY)) AS date
+  ),
+month_dfn as (
+               select distinct date,
+               fmc.*
+               from dates ds
+               left join initial_mashup fmc on ds.date = fmc.delivery_date
+               where date between '2025-02-03' and '2025-03-02'
+               --where FORMAT_DATE('%Y%m%d', delivery_date) between @DS_START_DATE and @DS_END_DATE
+               
+)
+select sum(demand_on_period) from month_dfn where stock_item_id = 'Mt. Kenya Milk ESL 500ML - 18 PC' and territory = 'Ruiru'  order by 1 desc --where stock_item_id = "Sumo Candles 8PC"
