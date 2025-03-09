@@ -1,0 +1,138 @@
+with
+sale_order as (
+                  select *,
+                  row_number()over(partition by id order by last_modified_date desc) as index
+                  from `kyosk-prod.karuru_reports.sales_order` 
+                  where date(created_date) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+sale_order_items as(
+                    select distinct date(created_date) as creation_date,
+                    id as sales_order_id,
+                    name as sales_order,
+                    territory_id,
+                    created_on_app,
+                    created_by,
+                    market_developer_name,
+                    route_id,
+                    oi.product_bundle_id,
+                    oi.catalog_item_qty,
+                    oi.discount_amount,
+                    oi.selling_price,
+                    oi.total,
+                    (oi.selling_price*oi.catalog_item_qty - oi.catalog_item_qty*oi.discount_amount) as total_net_order_amount,
+                    oi.category_id,
+                    oi.uom,
+                    oi.currency,
+                    outlet.name as outlet_name,
+                    cast(outlet.latitude as float64) as latitude,
+                    cast(outlet.longitude as float64) as longitude,
+                    outlet.phone_number as outlet_phone_number,
+                    route.route_name as route_name
+                    from sale_order, unnest(items) oi
+                    where index = 1
+),
+delivery_notes as (
+                    select *,
+                    row_number()over(partition by id order by updated_at desc) as index
+                    from `kyosk-prod.karuru_reports.delivery_notes`
+                    where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+delivery_notes_with_index as (
+                    select distinct date(created_at) as creation_date,
+                    id as delivery_note_id,
+                    code as delivery_note,
+                    delivery_trip_id,
+                    scheduled_delivery_date,
+                    delivery_date,
+                    outlet_id as delivery_outlet_id,
+                    country_code,
+                    currency,
+                    sale_order_id,
+                    odi.product_bundle_id,
+                    odi.qty_delivered,
+                    odi.discount_amount,
+                    odi.selling_price,
+                    odi.total_delivered,
+                    odi.status,
+                    odi.uom,
+                    odi.item_group_id,
+                    payment_request_id,
+                    driver.name as driver_name,
+                    driver.phone_number as driver_phone_number,
+                    agent_name as market_developer,
+                    delivery_coordinates 
+                    from delivery_notes, unnest(order_items) odi
+                    where index = 1
+),
+sales_invoice_with_index as (
+                    select *,
+                    row_number()over(partition by id order by modified desc) as index
+                    from `kyosk-prod.karuru_reports.sales_invoice` 
+                    where date(created) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+sales_invoice_data as (
+                      select distinct date(created) as created_date,
+                      id as sales_invoice_id,
+                      name as sales_invoice,
+                      kyosk_delivery_note,
+                      workflow_state,
+                      customer_name,
+                      i.delivery_note,
+                      driver,
+                      i.territory_id,
+                      price_list_currency,
+                      i.item_id,
+                      i.item_code,
+                      i.item_name,
+                      i.item_group_id,
+                      i.qty,
+                      i.uom,
+                      i.rate,
+                      i.amount,
+                      i.item_tax_rate,
+                      status
+                      from sales_invoice_with_index, unnest(items) i
+                      where index = 1
+),
+fraud_report as (
+                      select soi.territory_id as territory,
+                      soi.creation_date as sales_order_date,
+                      soi.sales_order_id,
+                      soi.sales_order,
+                      soi.created_on_app,
+                      soi.market_developer_name,
+                      soi.product_bundle_id as ordered_product,
+                      soi.catalog_item_qty as ordered_qty,
+                      soi.discount_amount,
+                      soi.total_net_order_amount as product_value,
+                      soi.category_id,
+                      soi.uom as ordered_uom,
+                      soi.currency as currency,
+                      soi.outlet_name as ordering_outlet,
+                      soi.latitude,
+                      soi.longitude,
+                      soi.outlet_phone_number as ordering_outlet_phone,
+                      soi.route_name as ordering_route,
+                      dnwi.creation_date as delivery_creation_date,
+                      dnwi.status as deliver_status,
+                      dnwi.scheduled_delivery_date,
+                      dnwi.delivery_note,
+                      dnwi.delivery_outlet_id,
+                      dnwi.country_code,
+                      dnwi.qty_delivered,
+                      dnwi.total_delivered,
+                      dnwi.status as delivery_status,
+                      dnwi.driver_name,
+                      dnwi.driver_phone_number,
+                      dnwi.delivery_coordinates,
+                      /*ST_GEOGPOINT(
+                        MAX(CASE WHEN dnwi.delivery_coordinates = 'longitude' THEN dnwi.delivery_coordinates END), 
+                        MAX(CASE WHEN dnwi.delivery_coordinates  = 'latitude' THEN dnwi.delivery_coordinates END))
+                      AS point_geom,*/
+                      ST_GEOGPOINT(soi.latitude, soi.longitude) as order_coordinates
+                      from sale_order_items soi
+                      left join delivery_notes_with_index dnwi on soi.product_bundle_id = dnwi.product_bundle_id --and soi.sales_order_id = dnwi.sale_order_id
+                      left join sales_invoice_data sid on soi.product_bundle_id = sid.item_id and sid.kyosk_delivery_note = dnwi.delivery_note_id
+                      where soi.territory_id not in ('Test KE Territory','Test UG Territory','Test TZ Territory','Test NG Territory')
+)
+select * from fraud_report
