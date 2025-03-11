@@ -525,7 +525,7 @@ get_re_order_details_cte as (
 
 
                               ------- min. stock balance qty
-                              round(safe_divide(gosbp.opening_stock_balance_qty, gosbp.opening_stock_cover_days) * 4) as minimum_stock_qty,
+                              round(safe_divide(coalesce(gosbp.opening_stock_balance_qty,1), coalesce(nullif(gosbp.opening_stock_cover_days,0),1)) * 4) as minimum_stock_qty,
                               round(safe_divide(gosbp.adjusted_opening_balance_qty, gosbp.adjusted_opening_stock_cover_days) * 4) as adjusted_minimum_stock_qty,
                               --- min.stock balance value
                               round(safe_divide(gosbp.opening_stock_balance_value, gosbp.opening_stock_cover_days) * 4) as minimum_stock_value,
@@ -720,7 +720,7 @@ stock_replenishment_report as (
 select * 
 --from get_re_order_details_cte
 from stock_replenishment_report 
---where supplier = "KAPA OIL REFINERIES LTD" and new_territory_id = "Voi"
-where stock_position_status = 'SLOB' --and new_territory_id = 'Voi'
---where item_code = 'Champion Fine Ballpens ASSORTED (7Blue, 1Black, 1Red, 1Green)'
+where supplier = "KAPA OIL REFINERIES LTD" and stock_position_status = "SLOB"  --and new_territory_id = "Voi"
+--where stock_position_status = 'SLOB' --and new_territory_id = 'Voi'
+--where item_code = 'Brava Mango Juice 500ml'
 order by opening_stock_balance_date, warehouse, item_code
