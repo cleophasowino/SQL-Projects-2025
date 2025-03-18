@@ -1,0 +1,103 @@
+----------------MD Remuneration Structure - NG ---------
+---------------- Created By Cleophas ------------------
+with
+-----------------Uploaded Monthly Remuneration structure----------
+nigeria_remuneration as (
+                            select distinct format_date('%Y-%m',Month) as month,
+                            fixed_asic_pay as fixed_basic_pay,
+                            variable_pay_total,
+                            gmv_target,
+                            gmv_weight,
+                            reactivation_target,
+                            reactivation_weight,
+                            duka_adoption_target,
+                            duka_adoption_weight,
+                            duka_account_target,
+                            duka_account_weight,
+                            revenue_customer_target,
+                            revenue_customer_weights
+                            from `kyosk-prod.karuru_upload_tables.NG_MD_remuneration`
+),
+------------------- Sale Orders------------------------
+sales_orders_with_index as (
+                            select *,
+                            row_number()over(partition by id order by last_modified_date desc) as index 
+                            from `kyosk-prod.karuru_reports.sales_order` 
+                            where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                            and order_status not in ('INITIATED')
+                            and date(created_date) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+sales_order_items_cte as (
+                            select distinct date(sowi.created_date) as creation_date,
+                            sowi.id as sales_order_id,
+                            territory.id as territory_id,
+                            soi.product_bundle_id,
+                            soi.catalog_item_qty,
+                            soi.selling_price,
+                            soi.catalog_item_qty * soi.discount_amount as discount_amount,
+                            soi.net_total as total_amount,
+                            soi.uom,
+                            soi.currency,
+                            territory.country_id,
+                            sowi.created_on_app,
+                            sowi.market_developer_name,
+                            route.route_name,
+                            outlet.id,
+                            outlet.name
+                            from sales_orders_with_index sowi, unnest(items) soi
+                            where index = 1
+                            and territory.country_id = 'Nigeria'
+),
+------------------ Delivery Notes ---------------------------
+delivery_notes_with_index as (
+                            select *,
+                            row_number()over(partition by id order by updated_at desc) as index
+                            from `kyosk-prod.karuru_sales_commission.karuru_sales_commission_dn_data` 
+                            where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                            and date(created_at) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+delivery_notes_items_cte as (
+                            select date(dnwi.created_at) as created_date,
+                            dnwi.territory_id,
+                            dnwi.currency,
+                            dnwi.sale_order_id,
+                            oi.product_bundle_id,
+                            oi.qty_delivered,
+                            oi.selling_price,
+                            oi.qty_delivered * oi.discount_amount as discount_amount,
+                            (oi.qty_delivered * oi.selling_price) - (oi.qty_delivered * oi.discount_amount) as amount_delivered ,
+                            oi.status as item_status,
+                            outlet.name,
+                            dnwi.agent_name,
+                            dnwi.route_id,
+                            dnwi.route_name
+                            from delivery_notes_with_index dnwi, unnest(order_items) oi
+                            where index = 1
+                            and country_code = 'NG'
+),
+------------------ Mashup----------------------------
+so_dn_cte as (
+                            select distinct soi.market_developer_name,
+                            dni.created_date as dn_creation_date,
+                            format_date('%Y-%m', date(dni.created_date)) as month,
+                            dni.territory_id,
+                            dni.route_name,
+                            dni.product_bundle_id,
+                            sum(dni.qty_delivered) as qty_delivered,
+                            sum(dni.discount_amount) as discount,
+                            sum(dni.amount_delivered) as gmv,
+                            soi.created_on_app
+                            from delivery_notes_items_cte dni
+                            left join sales_order_items_cte soi on dni.product_bundle_id = soi.product_bundle_id  and dni.sale_order_id = soi.sales_order_id and dni.agent_name = soi.market_developer_name
+                            group by 1,2,3,4,5,6,10
+),
+md_cost_calculation as (
+                            select distinct nr.month,
+                            sdc.market_developer_name,
+                            avg(nr.fixed_basic_pay) as fixed_basic_pay
+                            from so_dn_cte sdc
+                            left join nigeria_remuneration nr on sdc.month = nr.month
+                            group by 1,2 
+                            order by 1 desc
+)
+select * from md_cost_calculation
