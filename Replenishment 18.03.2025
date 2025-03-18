@@ -1,0 +1,739 @@
+------------------- Stock Ledger Entry, Front Mrgins, Material Request, Purchase Order, Purchase Receipt ---------------------
+-------------------- Created by Cleophas ----------------------------------------
+-------------------- v3, Stock Replenishments ---------------
+with
+
+uploaded_territory_mapping as (
+                      select distinct original_territory_id,
+                      new_territory_id,
+                      warehouse_name,
+                      from `karuru_upload_tables.territory_region_mapping` 
+                      ),
+---------------------------- Upload - Item Group Type -----------------------------------------------
+uploaded_item_group_mapping as (
+                        SELECT distinct country_code,
+                        item_group_id,
+                        type
+                        FROM `kyosk-prod.karuru_upload_tables.item_group_mapping` 
+                        where country_code = 'KE'
+                        ),
+--------------------------------- Upload - Supplier Lead Times -----------------------------------
+uploaded_territory_supplier_lead_times_cte as (
+                                                SELECT distinct company_id, 
+                                                supplier_name,
+                                                territory_id,
+                                                --item_code_id, 
+                                                avg_lead_time
+                                                FROM `kyosk-prod.karuru_views.average_supplier_lead_time` 
+                                                ),
+--------------------------------- Upload - Skus To Be Deleted -------------------------
+uploaded_skus_to_be_disabled as (
+                                SELECT distinct company_id, 
+                                item_code, 
+                                status 
+                                FROM `kyosk-prod.karuru_upload_tables.skus_to_be_disabled` 
+                                ),
+uploaded_skus_to_be_disabled_per_territory as (
+                                SELECT distinct warehouse, 
+                                item_code, 
+                                stock_uom, 
+                                status
+                                FROM `kyosk-prod.karuru_upload_tables.skus_to_be_disabled_per_territory` 
+                                ),
+stock_entry_item_group as (
+                            select distinct item_code,
+                            item_group_id,
+                            company_id
+                            from `kyosk-prod.karuru_scheduled_queries.stock_entry_item_to_item_group_mapping`),
+------------ Opening Stock Balances --------------
+opening_stock_balance_cte as (
+                            select distinct osb.opening_balance_date as opening_stock_balance_date,
+                            /*date_sub(date_trunc(opening_balance_date,week(monday)), interval 4 week) as four_week_demand_plan_start_date,
+                            date_sub(date_trunc(opening_balance_date,week(monday)), interval 1 day)  as four_week_demand_plan_end_date,*/
+                            date_sub(date_sub(opening_balance_date, interval 1 day),interval 27 day) as four_week_demand_plan_start_date,
+                            date_sub(opening_balance_date, interval 1 day)  as four_week_demand_plan_end_date,
+                            osb.company_id,
+                            osb.warehouse,
+                            utm.original_territory_id,
+                            utm.new_territory_id,
+                            case when osb.company_id ='KYOSK DIGITAL SERVICES LIMITED (UG)' then "UG"
+                                when osb.company_id = 'KYOSK DIGITAL SOLUTIONS NIGERIA LIMITED' then 'NG'
+                                when osb.company_id = 'KYOSK DIGITAL SERVICES LTD (KE)' then 'KE'
+                                when osb.company_id = 'KYOSK DIGITAL SERVICES LIMITED (TZ)' then 'TZ'
+                            end as country_code,
+
+                            ustbdpt.status as disable_sku_status,
+                            osb.item_code,
+                            osb.stock_uom,
+                            seig.item_group_id,
+                            round(osb.qty_after_transaction) as opening_stock_balance_qty,
+                            round(osb.valuation_rate) as opening_stock_balance_valuation_rate,
+                            round(osb.stock_value) as opening_stock_balance_value,
+                            osb.avg_age as opening_stock_balance_avg_age,
+                            --round(sum(osb.qty_after_transaction)) as opening_stock_balance_qty,
+                            --round(sum(osb.stock_value)) as opening_stock_balance_value
+                            FROM `kyosk-prod.karuru_scheduled_queries.opening_stock_balance`  osb
+                            left join uploaded_territory_mapping utm on osb.warehouse = utm.warehouse_name
+                            left join uploaded_skus_to_be_disabled_per_territory ustbdpt on osb.warehouse = ustbdpt.warehouse and osb.item_code = ustbdpt.item_code and osb.stock_uom = ustbdpt.stock_uom
+                            left join stock_entry_item_group seig on osb.item_code = seig.item_code and osb.company_id = seig.company_id 
+                            where osb.warehouse in ('Eastlands Main - KDKE', 'Embu Main - KDKE', 'Kiambu Main - KDKE', 'Kisumu 1 Main - KDKE', 'Majengo Mombasa Main - KDKE', 'Ruiru Main - KDKE', 'Voi Main - KDKE',
+                            "Igoma Main Warehouse - KDTZ","Mwenge Main Warehouse - KDTZ","Themi Main Warehouse - KDTZ","Uyole Main Warehouse - KDTZ",
+                            "Kawempe Main - KDUG","Luzira Main - KDUG","Makindye Main - KDUG", "Nalukolongo Main - KDUG",
+                            "Abuja-Bwari Main Warehouse - KDNG","Ajah Main Warehouse - KDNG","Bayelsa-Ahodaa Main- Warehouse - KDNG","Bodija Main Warehouse - KDNG","Ikeja Main Warehouse - KDNG",
+                            "Jos-Central Main Warehouse - KDNG","Surulere Main Warehouse - KDNG","Warri-Effurun Main Warehouse  - KDNG")
+                            and opening_balance_date = current_date
+                            --and company_id = 'KYOSK DIGITAL SERVICES LTD (KE)'
+                            ),
+----------------------------------------- Scheduled Query - Demand Plan ---------------------
+four_weeks_demand_plan_cte as (
+                select distinct start_date as four_week_demand_plan_start_date,
+                end_date as four_week_demand_plan_end_date,
+                territory_id,
+                dp.stock_item_id,
+                dp.item_group_id,
+                dp.stock_uom,
+                dp.daily_demand_qty,
+                dp.weekly_demand_qty
+                from `karuru_scheduled_queries.updated_demand_plan` dp
+                ),
+------------------------ Scheduled Query - Front Margins -------------------------
+scheduled_query_front_margins_report_cte as (
+                                              SELECT distinct delivery_date,
+                                              company,
+                                              territory_id,
+                                              item_name_of_packed_item, 
+                                              uom_of_packed_item,                       
+                                              sum(base_amount) as base_amount
+                                              FROM `kyosk-prod.karuru_scheduled_queries.front_margin` 
+                                              wHERE delivery_date > date_sub(date_trunc(current_date, month), interval 1 month)
+                                              --where delivery_date = date_sub(current_date, interval 1 day)
+                                              group by 1,2,3,4,5
+                                              ),
+previous_seven_day_front_margins_cte as (
+                                      select distinct territory_id,
+                                      item_name_of_packed_item as item_code,
+                                      uom_of_packed_item as stock_uom,
+                                      sum(base_amount) as gmv_vat_incl,
+                                      max(delivery_date) as latest_delivery_date
+                                      FROM scheduled_query_front_margins_report_cte
+                                      group by 1,2,3
+                                      ),
+-------------------- Material Reqests ---------------------
+material_request as(
+                    SELECT *, 
+                    row_number()over(partition by id order by date_modified desc) as index
+                    FROM `kyosk-prod.karuru_reports.material_request` 
+                    --where date(date_created) >= date_sub(current_date, interval 12 month)
+                    where date(date_created) between date_sub(date_trunc(current_date, month), interval 12 month) and date(current_date)
+                    and material_request_type = 'PURCHASE'
+                    and workflow_state not in ('REJECTED')
+                    --and company_id in ('KYOSK DIGITAL SERVICES LTD (KE)')
+                  ),
+material_request_items_cte as (
+                            select distinct mr.date_created,
+
+                            mr.company_id,
+                            mr.set_warehouse_id,
+                            mr.target_warehouse_territory_id,
+                            i.warehouse_id,
+
+                            mr.id,
+                            mr.name, 
+                            mr.workflow_state,
+                            mr.status,
+
+                            i.item_group,
+                            i.item_id,
+                            i.item_code,
+                            i.item_name,
+                            i.stock_uom,
+                            i.conversion_factor,
+                            i.uom,
+
+                            i.stock_qty,
+                            i.qty,
+                            i.ordered_qty,
+                            i.received_qty
+
+                            --mri.rate,
+                            --mri.amount                                
+                            from material_request mr, unnest(items) i
+                            where index = 1
+                            ),
+------------------------------- Purchase Order Item ----------------------------
+purchase_order as (
+                    SELECT *,
+                    row_number()over(partition by id  order by modified desc) as index
+                    FROM `kyosk-prod.karuru_reports.purchase_order` 
+                    where date(creation) between date_sub(date_trunc(current_date, month), interval 12 month) and date(current_date)
+                    ),
+purchase_order_items_cte as (
+                          select distinct creation,
+                          po.company,
+                          po.territory,
+                          po.warehouse_territory,
+                          i.warehouse_id,
+
+                          po.workflow_state,
+
+                          i.material_request,
+                          po.id,
+                          po.purchase_order_no,
+                          
+                          i.item_code_id,
+                          i.item_name,
+                          i.stock_uom,
+                          i.qty,
+                          i.stock_qty,
+                          i.item_group,
+
+                          --po.supplier,
+                          po.supplier_name,
+                          from purchase_order po, unnest(items) i
+                          where index =1
+                          ),
+---------------------------- Purchase Receipt Items ----------------------------------------
+purchase_receipt as (
+              SELECT *,
+              row_number()over(partition by id order by date_modified desc) as index
+              FROM `kyosk-prod.karuru_reports.purchase_receipt` 
+              --where date(date_created) >= date_sub(current_date, interval 12 month)
+              where date(date_created) between date_sub(date_trunc(current_date, month), interval 12 month) and date(current_date)
+              ),
+purchase_receipt_items_cte as (
+                            select distinct date_created,
+                            cast(posting_date as date) as posting_date,
+                            --posting_time,
+                            --company_id,
+                            pr.set_warehouse_id,
+                            pr.territory_id,
+
+                            pr.id,
+                            pr.name,
+                            i.material_request_id,
+                            i.purchase_order,
+
+                            pr.workflow_state,
+                            --i.item_id,
+                            i.item_code,
+                            i.item_name,
+                            i.uom,
+                            --i.conversion_factor,
+                            i.stock_uom,
+                            i.item_group_id,
+                            --pri.brand
+
+                            --pr.supplier,
+                            pr.supplier_name,
+
+                            i.received_qty,
+                            i.amount
+                            --supplier_group
+                            from purchase_receipt pr, unnest(items) as i
+                            where index = 1
+                            ),
+received_purchase_receipt_cte as (
+                                  select distinct posting_date,
+                                  set_warehouse_id,
+                                  territory_id,
+                                  item_code,
+                                  stock_uom,
+                                  --supplier_name,
+                                  sum(received_qty) as received_qty
+                                  from purchase_receipt_items_cte
+                                  group by 1,2,3,4,5--,6
+                                  ),
+------------------------------------------- MR, PO and PR Mashup ----------------------------
+mr_po_and_pr_cte as (
+            select distinct mri.date_created as mr_creation_datetime,
+            date(mri.date_created) as mr_creation_date,
+            mri.company_id as company_id,
+            mri.warehouse_id as warehouse_id,
+            mri.warehouse_id as mr_warehouse_id,
+            mri.set_warehouse_id as mr_set_warehouse_id,
+            mri.target_warehouse_territory_id as mr_target_warehouse_territory_id,
+            mri.target_warehouse_territory_id as territory_id,
+
+            mri.id as material_request_id,
+            mri.name as material_request,
+            mri.workflow_state as mr_workflow_state,
+            mri.status as mr_status,
+
+            case
+              when (mri.status = 'DRAFT') and (poi.workflow_state is null) and (pri.workflow_state is null) then 'MR In Draft; PO Is Null; PR Is Null'
+              when (mri.status = 'DRAFT') and (poi.workflow_state = 'CANCELLED') and (pri.workflow_state is null) then 'MR In Draft; PO Cancelled; PR Is Null'
+              when (mri.status = 'DRAFT') and (poi.workflow_state = 'PENDING') and (pri.workflow_state is null) then 'MR In Draft; PO In Pending; PR Is Null'
+              when (mri.status = 'DRAFT') and (poi.workflow_state = 'SUBMITTED') and (pri.workflow_state is null) then 'MR In Draft; PO In Submitted; PR Is Null'
+              when (mri.status = 'DRAFT') and (poi.workflow_state = 'REJECTED') and (pri.workflow_state is null) then 'MR In Draft; PO In Rejected; PR Is Null'
+
+              when (mri.status = 'ORDERED') and (poi.workflow_state is null) and (pri.workflow_state is null) then 'MR In Ordered; PO Is Null; PR Is Null'
+              when (mri.status = 'ORDERED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state is null) then 'MR In Ordered; PO In Approved; PR Is Null'
+              when (mri.status = 'ORDERED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state  = 'COMPLETED') then 'MR In Ordered; PO Approved; PR In Completed'
+              when (mri.status = 'ORDERED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state = 'SUBMITTED') then 'MR In Ordered; PO Approved; PR In Submitted'
+
+              when (mri.status = 'PARTIALLY_ORDERED') and (poi.workflow_state is null) and (pri.workflow_state is null) then 'MR In Partially Ordered; PO Is Null; PR Is Null'
+              when (mri.status = 'PARTIALLY_ORDERED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state is null) then 'MR In Partially Ordered; PO In Approved; PR Is Null'
+              when (mri.status = 'PARTIALLY_ORDERED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state = 'COMPLETED') then 'MR In Partially Ordered; PO In Approved; PR In Completed'
+              when (mri.status = 'PARTIALLY_ORDERED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state = 'REJECTED') then 'MR In Partially Ordered; PO In Approved; PR In Rejected'
+
+              when (mri.status = 'PARTIALLY_RECEIVED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state is null) then 'MR In Partially Received; PO In Approved; PR Is Null'
+              when (mri.status = 'PARTIALLY_RECEIVED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state = 'COMPLETED') then 'MR In Partially Received; PO In Approved; PR In Completed'
+              when (mri.status = 'PARTIALLY_RECEIVED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state = 'REJECTED') then 'MR In Partially Received; PO In Approved; PR In Rejected'
+
+              when (mri.status = 'RECEIVED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state is null) then 'MR In Received; PO In Approved; PR Is Null'
+              when (mri.status = 'RECEIVED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state = 'COMPLETED') then 'MR In Received; PO In Approved; PR In Completed'
+              when (mri.status = 'RECEIVED') and (poi.workflow_state = 'APPROVED') and (pri.workflow_state = 'REJECTED') then 'MR In Received; PO In Approved; PR In Rejected'
+            else 'UNSET' end as statuses_info,
+
+            mri.item_group as mr_item_group,
+            --mri.item_code as mr_item_code,
+            --mri.stock_uom as mr_stock_uom,
+            mri.item_code as item_code,
+            mri.stock_uom as stock_uom,
+            mri.conversion_factor as mr_conversion_factor,
+            --mri.uom as mr_uom,
+            mri.uom as uom,
+
+            mri.stock_qty as mr_stock_qty,
+            mri.qty as mr_qty,
+            mri.received_qty as mr_received_qty,
+
+            poi.creation as po_creation_datetime,
+            date(poi.creation) as po_creation_date,
+            poi.warehouse_id as po_warehouse_id,
+            poi.territory as po_territory,
+            poi.id as purchase_order_id,
+            poi.purchase_order_no,
+            poi.workflow_state as po_workflow_state,
+            poi.supplier_name as po_supplier,
+
+            pri.date_created as pr_creation_datetime,
+            date(pri.date_created) as pr_creation_date,
+            date(pri.posting_date) as pr_posting_date,
+            pri.id as purchase_receipt_id,
+            pri.workflow_state as pr_workflow_state,
+            pri.received_qty as pr_received_qty,
+            pri.supplier_name as pr_supplier,
+            pri.item_group_id as pr_item_group_id,
+
+            from material_request_items_cte mri
+            left join purchase_order_items_cte poi on mri.id = poi.material_request and mri.item_code = poi.item_code_id and mri.stock_uom = poi.stock_uom 
+            left join purchase_receipt_items_cte pri on poi.id = pri.purchase_order and poi.item_code_id = pri.item_code and poi.stock_uom = pri.stock_uom 
+            where mri.warehouse_id not in ('Kyosk HQ Receiving - KDKE', 'Test KE Receiving Bay - KDKE', 'Test KE Main - KDKE', 'Nakuru Receiving Bay - KDKE', 'Ongata Rongai Receiving Bay - KDKE', 
+            'Kisii Receiving bay - KDKE', 'Kawangware Receiving Bay - KDKE', 'Eldoret Receiving Bay - KDKE', 'Athi River Receiving Bay - KDKE', 'Test UG Receiving By - KDUG', 'Test Fresh TZ Receiving Bay - KDTZ',
+            'Ruai Receiving Bay - KDKE', 'Themi Receiving Bay - KDTZ', 'Mukono Receiving Bay - KDUG', 'Juja Receiving Bay - KDKE', 'Karatina Receiving Bay - KDKE', 'Meru Receiving Bay - KDKE', 
+            'Thika Rd Receiving Bay - KDKE', 'Benin- Sapele Receiving Bay - KDNG', 'Ilorin Main Warehouse - KDNG', 'Ilorin Receiving Bay - KDNG', 'Kano-Sabongari Receiving Bay - KDNG', 
+            'Kano-Zoo Receiving Bay - KDNG', 'PortHarcourt-Obiakpor Receiving Bay - KDNG', 'Vingunguti Receiving Bay - KDTZ', 'Okota Receiving Bay - KDNG', 'Surulere Receiving Bay - KDNG',
+            'Mtwapa Mombasa Receiving Bay - KDKE')
+            ),
+--------------------------- Pending MR, PO and PR -----------------------------------------
+pending_mr_po_and_pr_cte as (
+                            select distinct mr_creation_date,
+                            po_creation_date,
+                            company_id,
+                            warehouse_id,
+                            territory_id,
+                            statuses_info,
+                            material_request_id,
+                            purchase_order_id,
+                            item_code,
+                            stock_uom,
+                            mr_stock_qty,
+                            mr_qty,
+                            --po_supplier
+                            from mr_po_and_pr_cte
+                            where statuses_info in ('MR In Draft; PO In Pending; PR Is Null', 'MR In Draft; PO Is Null; PR Is Null', 'MR In Received; PO In Approved; PR Is Null')
+                            ),
+pending_mr_po_and_pr_agg_cte as (
+                                select distinct company_id,
+                                warehouse_id,
+                                territory_id,
+                                item_code,
+                                stock_uom,
+                                --po_supplier,
+                                sum(case when statuses_info = 'MR In Draft; PO In Pending; PR Is Null' then mr_stock_qty else 0 end) as mr_stock_qty_in_draft_with_pending_po,
+                                sum(case when statuses_info = 'MR In Draft; PO Is Null; PR Is Null' then mr_stock_qty else 0 end) as mr_stock_qty_in_draft_with_null_po,
+                                sum(case when statuses_info = 'MR In Ordered; PO In Approved; PR Is Null' then mr_stock_qty else 0 end) as  mr_stock_qty_in_ordered_with_approved_po,
+                                sum(case when statuses_info = 'MR In Received; PO In Approved; PR Is Null' then mr_stock_qty else 0 end) as  mr_stock_qty_in_received_with_approved_po,
+                                max(mr_creation_date) as pending_mr_max_creation_date
+                                from pending_mr_po_and_pr_cte
+                                group by 1,2,3,4,5
+                                ), 
+------------------- Latest MR, PO and PR ---------------------------------
+latest_sku_details_by_warehouse_cte as (
+                select distinct --company_id,
+                --warehouse_id,
+                territory_id,
+                item_code,
+                stock_uom,
+                last_value(mr_creation_date IGNORE NULLS)over(partition by warehouse_id, item_code order by mr_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) 
+                  as latest_mr_creation_date,
+                last_value(mr_item_group IGNORE NULLS)over(partition by warehouse_id, item_code order by mr_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) 
+                  as latest_mr_warehouse_item_group,
+
+                last_value(date(po_creation_date) IGNORE NULLS)over(partition by warehouse_id, item_code order by po_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) 
+                  as latest_po_creation_date,
+                last_value(po_supplier IGNORE NULLS)over(partition by warehouse_id, item_code order by po_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) 
+                  as latest_po_supplier,
+
+                last_value(pr_posting_date IGNORE NULLS)over(partition by warehouse_id, item_code order by pr_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) 
+                  as latest_pr_creation_date,
+                last_value(pr_posting_date IGNORE NULLS)over(partition by warehouse_id, item_code order by pr_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) 
+                  as latest_pr_posting_date,
+                last_value(pr_supplier IGNORE NULLS)over(partition by territory_id, item_code order by pr_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as latest_pr_supplier,
+                
+                from mr_po_and_pr_cte
+                      ),
+latest_sku_details_by_company_cte as (
+                select distinct company_id,
+                item_code,
+                stock_uom,
+                last_value(mr_item_group IGNORE NULLS)over(partition by company_id, item_code order by mr_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as latest_mr_item_group,
+                last_value(pr_item_group_id IGNORE NULLS)over(partition by company_id, item_code order by pr_creation_datetime asc ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) 
+                  as latest_pr_item_group_id,
+                from mr_po_and_pr_cte
+                      ),
+------------------------------ Mashup -------------------
+get_opening_stock_balance_adjustments_cte as (
+                                        select distinct osb.opening_stock_balance_date,
+                                        
+                                        osb.company_id,
+                                        osb.country_code,
+                                        osb.warehouse,
+                                        osb.original_territory_id,
+                                        osb.new_territory_id,
+
+                                        osb.disable_sku_status,
+                                        osb.item_code,
+                                        osb.stock_uom,
+
+                                        case
+                                          when (disable_sku_status = 'To Be Disabled') then 'To Be Disabled' 
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate = 0) then 'Free Of Charge (FOC)'
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate = 1) then 'Free Of Charge (FOC)'
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate > 1) and (osb.opening_stock_balance_qty = 0) then 'Zero Stock Balance Qty'
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate > 1) and (osb.opening_stock_balance_qty > 0) then 'With Stock Balance Qty'
+                                        else 'Active' end as check_opening_stock_balance_qty,
+                                        osb.opening_stock_balance_qty,
+                                        case
+                                          when (rpr.received_qty is null) then 'NO'
+                                        else 'YES' end as check_pr_received_qty,
+                                        coalesce(rpr.received_qty, 0) as pr_received_qty,
+                                        case
+                                          when (disable_sku_status = 'To Be Disabled') then 'To Be Disabled' 
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate = 0) then 'Free Of Charge (FOC)'
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate = 1) then 'Free Of Charge (FOC)'
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate > 1) and ((round(osb.opening_stock_balance_qty + coalesce(rpr.received_qty, 0))) = 0) then 'Zero Adjusted Stock Balance Qty'
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate > 1) and ((round(osb.opening_stock_balance_qty + coalesce(rpr.received_qty, 0))) > 0) then 'With Adjusted Stock Balance Qty'
+                                        else 'Active' end as check_adjusted_opening_stock_balance_qty,
+                                        round(osb.opening_stock_balance_qty + coalesce(rpr.received_qty, 0)) as adjusted_opening_balance_qty,
+                                        ------------ daily & weekly demand qty --------------
+                                        osb.four_week_demand_plan_start_date,
+                                        osb.four_week_demand_plan_end_date,
+                                        
+                                        case
+                                          when (disable_sku_status = 'To Be Disabled') then 'To Be Disabled' 
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate = 0) then 'Free Of Charge (FOC)'
+                                          when (osb.disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate = 1) then 'Free Of Charge (FOC)'
+                                          when (disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate > 1) and (d.weekly_demand_qty > 0) then 'Has Weekly Demand Qty'
+                                          when (disable_sku_status is null) and (osb.opening_stock_balance_valuation_rate > 1) and (d.weekly_demand_qty is null) then 'No Weekly Demand Qty'
+                                        else 'UNSET' end as check_weekly_demand,
+                                        coalesce(round(d.daily_demand_qty,0), 0) as daily_demand_qty,
+                                        coalesce(round(d.weekly_demand_qty,0),0) as weekly_demand_qty,
+                                        -----------------
+                                        cast(ceil(safe_divide(osb.opening_stock_balance_qty, coalesce(nullif(avg(d.daily_demand_qty),0),1))) as int64) as opening_stock_cover_days,
+                                        cast(round(safe_divide((osb.opening_stock_balance_qty + coalesce(rpr.received_qty,0)), coalesce(nullif(avg(d.daily_demand_qty),0),1))) as int64) as adjusted_opening_stock_cover_days,
+
+                                        osb.opening_stock_balance_valuation_rate,
+                                        osb.opening_stock_balance_value,
+                                        osb.opening_stock_balance_avg_age,
+                                        --rpr.supplier_name,
+                                        
+                                        from opening_stock_balance_cte osb
+                                        left join received_purchase_receipt_cte rpr on (osb.opening_stock_balance_date = rpr.posting_date) and (osb.original_territory_id = rpr.territory_id) and 
+                                        (osb.item_code = rpr.item_code and osb.stock_uom = rpr.stock_uom)
+                                        left join four_weeks_demand_plan_cte d on (osb.item_code = d.stock_item_id) and (osb.stock_uom = d.stock_uom) and (osb.original_territory_id = d.territory_id) and 
+                                        (osb.four_week_demand_plan_start_date = d.four_week_demand_plan_start_date) and osb.four_week_demand_plan_end_date = d.four_week_demand_plan_end_date and osb.item_group_id = d.item_group_id
+                                        group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,23,24,25, rpr.received_qty,d.weekly_demand_qty
+                                        ),
+get_opening_stock_balance_purchases_cte as (
+                                          select gosba.*,
+
+                                          ----------- item group -----------------------
+                                          coalesce(lwp.latest_mr_warehouse_item_group, lsdbc.latest_mr_item_group,lsdbc.latest_pr_item_group_id, 'UNSET') as item_group_id,
+                                          ------------ material requests ---------
+                                          lwp.latest_mr_creation_date,
+                                          ------------- purchase order ----------------
+                                          lwp.latest_po_creation_date,
+                                          --------- purchase receipts ----------------
+                                          case
+                                            when (disable_sku_status is not null) then 'To Be Disabled' 
+                                            when (disable_sku_status is null) and (lwp.latest_pr_posting_date is null) then 'No Latest PR'
+                                          else 'Has Latest PR' end as check_latest_pr,
+                                          lwp.latest_pr_creation_date,
+                                          lwp.latest_pr_posting_date,
+                                          --------- supplier
+
+                                          coalesce(lwp.latest_pr_supplier, lwp.latest_po_supplier, 'UNSET') as supplier,
+                                          --utslt.avg_lead_time,
+                                          
+
+                                          ------------ pending mr, po & pr
+                                          coalesce(p.mr_stock_qty_in_draft_with_pending_po,0) as mr_stock_qty_in_draft_with_pending_po,
+                                          coalesce(p.mr_stock_qty_in_draft_with_null_po, 0) as mr_stock_qty_in_draft_with_null_po,
+                                          coalesce(p.mr_stock_qty_in_ordered_with_approved_po, 0) as mr_stock_qty_in_ordered_with_approved_po,
+                                          coalesce(p.mr_stock_qty_in_received_with_approved_po, 0) as mr_stock_qty_in_received_with_approved_po,
+
+                                          ------------ latest gmv
+                                          psdfm.latest_delivery_date,
+                                          psdfm.gmv_vat_incl as last_seven_day_gmv_vat_incl,
+                                          from get_opening_stock_balance_adjustments_cte gosba
+                                          left join latest_sku_details_by_warehouse_cte lwp on gosba.original_territory_id = lwp.territory_id and gosba.item_code = lwp.item_code and gosba.stock_uom = lwp.stock_uom
+                                         
+                                          left join latest_sku_details_by_company_cte lsdbc on gosba.company_id = lsdbc.company_id and gosba.item_code = lsdbc.item_code
+                                          left join pending_mr_po_and_pr_agg_cte p on (gosba.original_territory_id = p.territory_id) and (gosba.item_code = p.item_code) and (gosba.stock_uom = p.stock_uom)
+                                          left join previous_seven_day_front_margins_cte psdfm on gosba.original_territory_id = psdfm.territory_id and gosba.item_code = psdfm.item_code and gosba.stock_uom = psdfm.stock_uom
+                                          ),
+get_re_order_details_cte as (
+                              select distinct 
+                              gosbp.opening_stock_balance_date,
+                              gosbp.four_week_demand_plan_start_date,
+                              gosbp.four_week_demand_plan_end_date,
+
+                              gosbp.company_id,
+                              gosbp.warehouse,
+                              gosbp.original_territory_id,
+                              gosbp.new_territory_id,
+                              --gosbp.country_code,
+
+
+                              gosbp.item_code,
+                              gosbp.stock_uom,
+
+                              gosbp.check_weekly_demand,
+                              gosbp.daily_demand_qty,
+                              gosbp.weekly_demand_qty,
+
+                              gosbp.check_opening_stock_balance_qty,
+                              gosbp.check_adjusted_opening_stock_balance_qty,
+                              gosbp.opening_stock_balance_qty,
+                              gosbp.check_pr_received_qty,
+                              gosbp.pr_received_qty,
+                              gosbp.adjusted_opening_balance_qty,
+
+                              gosbp.opening_stock_balance_valuation_rate,
+                              gosbp.opening_stock_balance_value,
+                              gosbp.opening_stock_cover_days,
+                              gosbp.adjusted_opening_stock_cover_days,
+                              gosbp.opening_stock_balance_avg_age,
+
+                              ------- Demand during lead time---
+                              coalesce(gosbp.daily_demand_qty, 0) * coalesce(avg_lead_time,1)AS demand_during_lead_time,
+
+                              ---------Stock cover demand
+                              coalesce(gosbp.daily_demand_qty, 0) * coalesce(gosbp.opening_stock_cover_days, 1) as stock_cover_demand,
+
+                              -----------Stock required----------
+                              (coalesce(gosbp.daily_demand_qty, 0) * coalesce(avg_lead_time, 1)) + (coalesce(gosbp.daily_demand_qty,0) * coalesce(gosbp.opening_stock_cover_days,1) ) + coalesce(gosbp.weekly_demand_qty, 0) as stock_required,
+
+                              -------- Replenishment Qty
+                              round(((COALESCE(gosbp.daily_demand_qty, 0) * COALESCE(avg_lead_time, 1)) + (gosbp.daily_demand_qty * gosbp.opening_stock_cover_days ) + gosbp.weekly_demand_qty) - gosbp.opening_stock_balance_qty,0) as replenishment_qty,
+
+
+                              ------- min. stock balance qty
+                              round(safe_divide(coalesce(gosbp.opening_stock_balance_qty,1), coalesce(nullif(gosbp.opening_stock_cover_days,0),1)) * 4) as minimum_stock_qty,
+                              round(safe_divide(coalesce(gosbp.adjusted_opening_balance_qty,1), coalesce(nullif(gosbp.adjusted_opening_stock_cover_days, 0), 1)) * 4) as adjusted_minimum_stock_qty,
+                              --- min.stock balance value
+                              round(safe_divide(coalesce(gosbp.opening_stock_balance_value,1), coalesce(nullif(gosbp.opening_stock_cover_days,0),1)) * 4) as minimum_stock_value,
+                              round(safe_divide(coalesce(gosbp.opening_stock_balance_value,1), coalesce(nullif(gosbp.adjusted_opening_stock_cover_days,0),1)) * 4) as adjusted_minimum_stock_value,
+
+                              round((coalesce(max(gosbp.daily_demand_qty), 0) * coalesce(max(avg_lead_time), 1))-((coalesce(avg(gosbp.daily_demand_qty), 0) * coalesce(avg(avg_lead_time), 1)))+coalesce(gosbp.daily_demand_qty, 0) * coalesce(avg_lead_time, 1))as reorder_point_qty,
+                              round((coalesce(max(gosbp.daily_demand_qty), 1) * coalesce(max(avg_lead_time), 1)) - ((coalesce(avg(gosbp.daily_demand_qty), 1) * coalesce(avg(avg_lead_time), 1))) + (coalesce(gosbp.daily_demand_qty, 1) * coalesce(avg_lead_time, 1)) + (1.65 * coalesce(stddev(gosbp.daily_demand_qty), 0) * coalesce(stddev(avg_lead_time), 0))) as adjusted_reorder_point_qty,
+
+
+                              round(safe_divide(coalesce(gosbp.opening_stock_balance_qty,0), coalesce(nullif(gosbp.opening_stock_cover_days,0),1)) * 7) as inventory_holding_for_7_day_demand,
+                              round(safe_divide(coalesce(gosbp.adjusted_opening_balance_qty,0), coalesce(nullif(gosbp.adjusted_opening_stock_cover_days,0),1)) * 7) as adjusted_inventory_holding_for_7_day_demand,
+
+                              round(safe_divide(coalesce(gosbp.opening_stock_balance_value,0), coalesce(nullif(gosbp.opening_stock_cover_days,0),1)) * 7) as maximum_7_day_stock_value,
+                              round(safe_divide(coalesce(gosbp.opening_stock_balance_value,0), coalesce(nullif(gosbp.adjusted_opening_stock_cover_days,0),1)) * 7) as adjusted_maximum_7_day_stock_value,
+                              
+                              --- item group and type
+                              coalesce(uigm.type) as item_group_type,
+                              gosbp.item_group_id,
+
+                              gosbp.check_latest_pr,
+                              gosbp.latest_pr_creation_date,
+                              gosbp.latest_pr_posting_date,
+
+                              ---- supplier
+                              gosbp.supplier,
+                              utslt.avg_lead_time,
+                              --coalesce(utslt.avg_lead_time, 0) as avg_lead_time,
+                              ------------ latest gmv
+                              gosbp.latest_delivery_date,
+                              gosbp.last_seven_day_gmv_vat_incl,
+
+                              ------------ pending mr, po & pr
+                              gosbp.mr_stock_qty_in_draft_with_pending_po,
+                              gosbp.mr_stock_qty_in_draft_with_null_po,
+                              gosbp.mr_stock_qty_in_ordered_with_approved_po,
+                              gosbp.mr_stock_qty_in_received_with_approved_po,
+                              
+                              from get_opening_stock_balance_purchases_cte gosbp
+                              left join uploaded_territory_supplier_lead_times_cte utslt on gosbp.original_territory_id = utslt.territory_id and gosbp.supplier = utslt.supplier_name 
+                              left join uploaded_item_group_mapping uigm on gosbp.item_group_id = uigm.item_group_id --and gosbp.country_code = uigm.country_code 
+                              group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25, avg_lead_time, uigm.type,gosbp.item_group_id,gosbp.check_latest_pr,gosbp.latest_pr_creation_date,gosbp.latest_pr_posting_date,gosbp.supplier,gosbp.latest_delivery_date,gosbp.last_seven_day_gmv_vat_incl,gosbp.mr_stock_qty_in_draft_with_pending_po,gosbp.mr_stock_qty_in_draft_with_null_po,gosbp.mr_stock_qty_in_ordered_with_approved_po,gosbp.mr_stock_qty_in_received_with_approved_po,avg_lead_time
+                              ),
+get_stock_position_status_cte as (
+                        select distinct 
+                        grod.opening_stock_balance_date,
+                        
+                        grod.company_id,
+                        grod.warehouse,
+                        grod.new_territory_id,
+                        grod.stock_cover_demand,
+                        grod.stock_required,
+                        grod.demand_during_lead_time,
+                        grod.replenishment_qty,
+                        
+                        grod.item_code,
+                        grod.stock_uom,
+
+                        --usr.last_seven_day_gmv_vat_incl,
+                        -------------- get demand -------------
+                        grod.four_week_demand_plan_start_date,
+                        grod.four_week_demand_plan_end_date,
+                        --grod.check_weekly_demand,
+                        grod.daily_demand_qty,
+                        grod.weekly_demand_qty,
+
+                        ---------- opening balance qty ----------------------
+                        --grod.check_opening_stock_balance_qty,
+                        grod.check_adjusted_opening_stock_balance_qty,
+                        grod.opening_stock_balance_qty,
+                        --grod.check_pr_received_qty,
+                        grod.pr_received_qty,
+                        grod.adjusted_opening_balance_qty,
+                        grod.opening_stock_cover_days,
+                        grod.adjusted_opening_stock_cover_days,
+                        grod.minimum_stock_qty,
+                        --grod.re_order_point_stock_qty,
+                        grod.reorder_point_qty,
+                        grod.adjusted_reorder_point_qty,
+                        grod.inventory_holding_for_7_day_demand,
+                        case
+                          when (grod.adjusted_inventory_holding_for_7_day_demand is null) then grod.weekly_demand_qty
+                          when (grod.adjusted_inventory_holding_for_7_day_demand = 0) then grod.weekly_demand_qty
+                        else grod.adjusted_inventory_holding_for_7_day_demand end as adjusted_inventory_holding_for_7_day_demand,
+                        
+                        ceil(grod.stock_required - grod.adjusted_opening_balance_qty) as adjusted_stock_deficit_new,
+                        round(grod.adjusted_opening_balance_qty - coalesce(grod.adjusted_inventory_holding_for_7_day_demand, grod.weekly_demand_qty)) as adjusted_stock_deficit,
+                        
+                       case
+                          --- To Be Disabled ---
+                          when (adjusted_opening_balance_qty >= 0) and (check_latest_PR in ('To Be Disabled','No Latest PR')) and (grod.weekly_demand_qty >= 0) then 'Consider Disabling'
+                          -----New Listing-----  
+                          when (adjusted_opening_balance_qty > 0) and (check_latest_PR in ('Has Latest PR','No Latest PR')) and (grod.weekly_demand_qty = 0) and (opening_stock_balance_avg_age < 7) then 'New Listing'
+                          ---------------------- SLOB ----------------------
+                          when (adjusted_opening_balance_qty > 0) and (check_latest_pr in ('Has Latest PR','No Latest PR')) and (grod.weekly_demand_qty >= 0) and (opening_stock_balance_avg_age > 7) and (adjusted_opening_stock_cover_days > opening_stock_balance_avg_age) /*or (adjusted_opening_stock_cover_days < opening_stock_balance_avg_age)*/  then 'SLOB'
+                          ------------------ 4-7 Day Stock Cover ---------------------------------
+                          when (adjusted_opening_balance_qty > 0) and (check_latest_pr in ('Has Latest PR', 'No Latest PR')) and (grod.weekly_demand_qty > 0) and (adjusted_opening_stock_cover_days between 4 and 7) then '4-7 Day Stock Cover'
+                          ---------------- Out Of Stock --------------
+                          when (adjusted_opening_balance_qty >= 0) and (check_latest_pr in ('Has Latest PR','No Latest PR')) and (grod.weekly_demand_qty > 0) and (adjusted_opening_stock_cover_days between 0 and 3) then 'Out Of Stock'
+                        else 'UNSET' end as stock_position_status,
+                        ------- opening stock balance value
+                        grod.opening_stock_balance_valuation_rate,
+                        cast(grod.opening_stock_balance_value as float64) as opening_stock_balance_value,
+                        cast(grod.minimum_stock_value as float64) as minimum_stock_value,
+                        --grod.re_order_point_stock_value,
+                        cast(grod.maximum_7_day_stock_value as float64) as maximum_7_day_stock_value,
+                        grod.opening_stock_balance_avg_age,
+
+                        grod.supplier,
+                        grod.item_group_type,
+                        grod.item_group_id,
+                        grod.avg_lead_time,
+
+                        --- latest Purchase Receipt
+                        grod.check_latest_pr,
+                        grod.latest_pr_creation_date,
+                        grod.latest_pr_posting_date,
+
+                        ------------ latest gmv
+                        grod.latest_delivery_date,
+                        grod.last_seven_day_gmv_vat_incl,
+
+                        ------------ pending mr, po & pr
+                        grod.mr_stock_qty_in_draft_with_pending_po,
+                        grod.mr_stock_qty_in_draft_with_null_po,
+                        grod.mr_stock_qty_in_ordered_with_approved_po,
+                        grod.mr_stock_qty_in_received_with_approved_po,
+                        from get_re_order_details_cte grod
+                        ),
+get_recommendations_cte as (
+  select *,
+  case
+    when (stock_position_status = 'Out Of Stock') and (check_adjusted_opening_stock_balance_qty = 'Zero Adjusted Stock Balance Qty') then (opening_stock_balance_valuation_rate * adjusted_stock_deficit_new )
+    when (stock_position_status = 'Out Of Stock') and (check_adjusted_opening_stock_balance_qty = 'With Adjusted Stock Balance Qty') and (adjusted_stock_deficit_new < 0) then (adjusted_stock_deficit_new * opening_stock_balance_valuation_rate * -1)
+  else 0 end as out_of_stock_value,
+  case
+    when (stock_position_status = 'SLOB') then (opening_stock_balance_value - maximum_7_day_stock_value) 
+  else 0 end as slob_value_7_days,
+  case when (stock_position_status = 'SLOB') then (adjusted_opening_balance_qty * opening_stock_balance_valuation_rate) else 0 end as slob_value,
+   case
+    when (stock_position_status = 'Consider Disabling') then 'To Be Disabled; Clear Any Existing Stock'
+    when (stock_position_status = 'New Listing') then 'To Be Activated; By The Territory Manager since has No Weekly Demand'
+
+    --when (stock_position_status = 'Dead Stock') then 'Dead Stock; To Be Disabled'
+    --when (stock_position_status = 'Consider Disabling') then 'Consider Disabling; No Weekly Demand Qty'
+    when (stock_position_status = 'SLOB') then 'SLOB; Hold On Pending Purchase Orders'
+    when (stock_position_status ='4-7 Day Stock Cover') then 'Low Stock; Expediate LPO Approval & Monitor Supplier'
+    when (stock_position_status = 'Out Of Stock') then 'Out Of Stock; Expediate LPO Approval & Monior Supply'
+    --when (stock_position_status = 'New Listing') then 'New Listing; Revamp Sales Order Generation'
+    --when (stock_position_status = 'Free Of Charge (FOC)') then 'Free Of Charge (FOC); Consider Adding to Promo Items for more Sales Order Generation'
+  else 'UNSET' end as recommendation,
+
+  from get_stock_position_status_cte
+  ),
+stock_replenishment_report as (
+                                select *,
+                                case
+                                  when (stock_position_status = 'SLOB') then slob_value
+                                  when (stock_position_status = 'Out Of Stock') then out_of_stock_value
+                                  when stock_position_status in ('4-7 Day Stock Cover', 'Consider Disabling', 'New Listing') then opening_stock_balance_value
+                                else 0 end as stock_value,
+                                case when recommendation in ('Low Stock; Expediate LPO Approval & Monitor Supplier','Out Of Stock; Expediate LPO Approval & Monior Supply') then (0 - (adjusted_stock_deficit_new)) * opening_stock_balance_valuation_rate else 0 end as adjusted_stock_deficit_amount,
+                                case when adjusted_stock_deficit_new < 0 then "Excess Stock"
+                                when adjusted_stock_deficit_new = 0 then "optimal Stock"
+                                else "Replenishment, Check Position Status & Recommendation"
+                                end as stock_deficit_status
+                                from get_recommendations_cte gr
+
+                                )
+
+select  * from stock_replenishment_report --where stock_position_status = 'UNSET'
+-- and new_territory_id = "Kisumu" --and stock_value < 0
+--company_id,original_territory_id,item_code,item_group_id,adjusted_opening_balance_qty,opening_stock_balance_value,supplier
+--company_id, new_territory_id,  sum(opening_stock_balance_value)
+--from get_opening_stock_balance_purchases_cte
+--where opening_stock_balance_date = current_date() --and item_code = '7 Hills Sweet White 750 ML' and new_territory_id = 'Nalukolongo'
+ --and company_id = 'KYOSK DIGITAL SERVICES LTD (KE)' 
+ --order by item_code,item_group_id,original_territory_id   desc
+--group by company_id, 2 
+--where company_id = 'Kyosk Digital Services (KE)'
+--where latest_po_supplier is null
+--stock_replenishment_report --where avg_lead_time is null --and supplier = 'Euro Mega Atlantic Nigeria Limited'
+--from stock_replenishment_report 
+--where supplier = 'Abacus Pharma Africa Limited'
+--where stock_position_status = 'Free Of Charge (FOC)'
+--where stock_position_status = 'UNSET' --and item_code = 'Gelx Black Gel Pen' and new_territory_id = 'Nairobi Inner'
+--group by 1
+--where supplier = 'MAX GRAINS LIMITED'
+--where supplier = "KAPA OIL REFINERIES LTD"
+--and stock_position_status = "SLOB"
+--and new_territory_id = "Kiambu"
+--where stock_position_status = 'SLOB' --and new_territory_id = 'Voi'
+--where item_code = '210 Maize Flour 2KG'
+--and new_territory_id = 'Ruiru' and opening_stock_balance_date = '2025-03-12'
+where FORMAT_DATE('%Y%m%d', opening_stock_balance_date) between @DS_START_DATE and @DS_END_DATE
+order by opening_stock_balance_date, warehouse, item_code
