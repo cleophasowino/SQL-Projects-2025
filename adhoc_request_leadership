@@ -1,0 +1,104 @@
+with
+fx_rate_conversion as (
+                        SELECT distinct start_date,
+                        end_date,
+                        country_code,
+                        fx_rate,
+                        fx_rate_dfn
+                        FROM `kyosk-prod.karuru_reports.uploaded_karuru_fx_rate_conversion` 
+                        ),
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+delivery_note_with_index as (
+                              select *,
+                              row_number()over(partition by id order by updated_at desc ) as index
+                              from `karuru_reports.delivery_notes` 
+                              where date(created_at) >= '2022-04-01'
+                              and territory_id not in ("Kyosk TZ HQ", "Kampala","Uganda","DKasarani","Kyosk HQ","Kenya","Test UG Territory","Test KE Territory",
+                              "Test NG Territory","Test TZ Territory",'Test Fresh TZ Territory')  
+                            ),
+delivery_note_items as (
+                    select coalesce(date(dni.delivery_date), date(dni.updated_at)) as delivery_date,
+                    dni.code as delivery_note,
+                    dni.id as delivery_note_id,
+                    dni.outlet_id,
+                    dni.outlet.name as outlet_name,
+                    dni.outlet.phone_number,
+                    dni.agent_name,
+                    dni.territory_id, 
+                    case when dni.id = '0K2NTNYQ1HRWP' then 'UG' else dni.country_code end as country_code,
+                    sum(oi.total_delivered) - sum((oi.discount_amount * qty_delivered)) as amount_delivered
+                    from delivery_note_with_index dni,unnest(order_items) oi
+                    where index = 1
+                    and dni.status in ('PAID','DELIVERED','CASH_COLLECTED')
+                    and oi.status = 'ITEM_FULFILLED'
+                    group by 1,2,3,4,5,6,7,8,9
+                    ),
+daily_deliveries as (
+                    select distinct dni.delivery_date,
+                    dni.delivery_note,
+                    dni.delivery_note_id,
+                    dni.outlet_id,
+                    dni.outlet_name,
+                    dni.phone_number,
+                    dni.agent_name,
+                    dni.territory_id, 
+                    dni.country_code,                  
+                    frc.fx_rate,
+                    frc.fx_rate_dfn,
+                    dni.amount_delivered,
+                    dni.amount_delivered / frc.fx_rate as amount_delivered_in_usd,
+                    from delivery_note_items dni
+                    left join fx_rate_conversion frc on dni.country_code = frc.country_code and dni.delivery_date between frc.start_date and frc.end_date
+                    --group by 1,2,3,4,5,6,7,8,9,10,11
+                    ),
+no_of_orders_per_month as (SELECT date(date_trunc(created_date, month)) as creation_month,territory_id,territory.country_code, count(id) as no_of_orders FROM `kyosk-prod.karuru_reports.sales_order` WHERE TIMESTAMP_TRUNC(created_date, DAY) >= '2022-04-01' and created_on_app = "Duka App" group by 1,2,3
+),
+territory_region_mapping as (
+                              SELECT distinct country,
+                              region,
+                              sub_region,
+                              division,
+                              original_territory_id, 
+                              new_territory_id,
+                              FROM `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+                              ),
+monthly_paid_deliveries as (select date_trunc(delivery_date,month) as delivery_month,
+                      territory_id,
+                      fx_rate,
+                      /*case when date_trunc(delivery_date, month) between '2022-04-01' and '2023-03-31' then 'Actual Rate' 
+                      when  date_trunc(delivery_date, month) between '2023-04-01' and '2024-03-31' then 'Actual Rate'
+                      when date_trunc(delivery_date, month) between '2024-04-01' and '2025-03-31' then 'Actual Rate' else null 
+                      end as fx_rate_dfn,*/
+                      fx_rate_dfn,
+                      case when fx_rate_dfn = 'Actual Rate' then fx_rate else null end as actual_fx,
+                      count(distinct delivery_date) as count_of_delivery_dates,
+                      count (distinct outlet_id) as no_of_outlets,
+                      count(distinct delivery_note_id) as no_of_delivered_orders,
+                      sum(amount_delivered) as amount_delivered,
+                      sum(amount_delivered_in_usd) as amount_delivered_in_usd
+                      FROM  daily_deliveries cm
+                      --where delivery_date >= date_sub(date_trunc(current_date, month), interval 8 month)
+                      --left join fx_conversion fc on format_date('%Y-%m',cm.delivery_date ) = 
+                      where delivery_date >= '2022-04-1' 
+                      group by 1,2,3,4
+                      ),
+summary as (  select mpd.*,
+                    nopm.creation_month,
+                    count(distinct creation_month) as count_of_months,
+                    no_of_orders,
+                    from monthly_paid_deliveries mpd
+                    --left join monthly_paid_deliveries mpd on mpd.outlet_id = oas.id and mpd.delivery_month = oas.month   
+                    left join no_of_orders_per_month nopm on mpd.delivery_month = nopm.creation_month and mpd.territory_id = nopm.territory_id
+                    where actual_fx is not null
+                    group by 1,2,3,4,5,6,7,8,9,10,13,nopm.creation_month
+                    ),
+
+final_report as (
+  select s.*except(fx_rate, count_of_months,creation_month),
+  safe_divide(s.amount_delivered,s.no_of_delivered_orders) as avg_basket_value_local_currency,
+  safe_divide(safe_divide(s.amount_delivered, s.no_of_delivered_orders), actual_fx) as avg_basket_value_in_usd,
+  safe_divide(s.no_of_delivered_orders, s.no_of_outlets) as order_frequency
+  from summary s
+  group by creation_month, 2,3,4,5,6,7,8,9,10,11,12,delivery_month
+)
+select * from final_report order by 1 desc
