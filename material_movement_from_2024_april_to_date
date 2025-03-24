@@ -1,0 +1,95 @@
+with
+uploaded_warehouse as (
+  select *
+  from `kyosk-prod.karuru_upload_tables.warehouses` 
+  
+),
+delivery_trip_with_index as (
+  select *,
+  row_number()over(partition by id order by updated_at desc) as index
+  from `kyosk-prod.karuru_reports.delivery_trips`
+  --where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+  where date(created_at) >= '2024-04-01'
+),
+delivery_trip_data as (
+  select id,
+  code,
+  status as delivery_trip_status,
+  (delivery_note_ids),
+  from delivery_trip_with_index
+  where index = 1
+),
+delivery_notes_with_index as (
+                            select *,
+                            row_number()over(partition by id order by updated_at desc) as index
+                            from `kyosk-prod.karuru_reports.delivery_notes` 
+                            where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                            --and date(created_at) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+                            and date(created_at) >= '2024-04-01'
+),
+delivery_notes_items_cte as (
+                            select date(dnwi.created_at) as dn_created_date,
+                            dnwi.territory_id,
+                            dtd.id as delivery_trip_id,
+                            dnwi.id as delivery_note_id,
+                            dnwi.currency,
+                            dnwi.sale_order_id,
+                            oi.product_bundle_id,
+                            oi.qty_delivered,
+                            oi.selling_price,
+                            oi.qty_delivered * oi.discount_amount as discount_amount,
+                            (oi.qty_delivered * oi.selling_price) - (oi.qty_delivered * oi.discount_amount) as amount_delivered ,
+                            oi.status as item_status,
+                            outlet.name,
+                            dnwi.agent_name,
+                            dnwi.route_id,
+                            dnwi.route_name,
+                            ii.stock_item_id,
+                            ii.inventory_item_qty,
+                            dnwi.status as delivery_note_status,
+                            date(dnwi.delivery_date) as delivery_date
+                            from delivery_notes_with_index dnwi, unnest(order_items) oi, unnest(oi.inventory_items) ii
+                            left join delivery_trip_data dtd on dnwi.id in unnest(dtd.delivery_note_ids)
+                            where index = 1 and dtd.id is not null
+                            
+),
+material_transfers_with_index as (
+  select *,
+  row_number()over(partition by id order by updated_at desc) as index
+  from `kyosk-prod.karuru_reports.material_transfers`
+  where date(created_at)>= '2024-04-01'
+  --where date(created_at)>= date_sub(date_trunc(current_date(), month), interval 1 month)
+  and territory_id not in ('Test KE Territory', 'Test NG Territory','Test UG Territory', 'Test TZ Territory')
+),
+material_transfers_data as (
+  select dni.*,
+  mtwi.name as material_transfer_code,
+  mtwi.created_at,
+  mtwi.destination_wh_id,
+  mtwi.origin_wh_id,
+  mtwi.mt_status as material_transfer_status,
+  stt.sku,
+  stt.qty as transfer_sku_qty
+  from material_transfers_with_index mtwi, unnest(skus_to_transfer) stt
+  left join delivery_notes_items_cte dni on mtwi.delivery_trip_id = dni.delivery_trip_id and mtwi.territory_id = dni.territory_id and stt.sku = dni.stock_item_id
+  where index = 1
+  --and item_status = 'ITEM_CANCELLED'
+),
+mashup as (
+  select mtd.*,
+  case when mtd.destination_wh_id = uwd.id then uwd.name else null end as destination_warehouse,
+  case when mtd.origin_wh_id = uwo.id then uwo.name else null end as origin_warehouse,
+  case when mtd.destination_wh_id = uwd.id then uwd.warehouse_type else null end as destination_warehouse_type,
+  case when mtd.origin_wh_id = uwo.id then uwo.warehouse_type else null end as origin_warehouse_type,
+  from material_transfers_data mtd
+  left join uploaded_warehouse uwd on mtd.destination_wh_id = uwd.id
+  left join uploaded_warehouse uwo on mtd.origin_wh_id = uwo.id
+  where delivery_note_status in ('DRIVER_CANCELLED','DELIVERED')
+)
+select *except(name, agent_name)
+from mashup 
+--where delivery_note_id = '0JP0X2JB2P5YX'
+--where sku = 'Ntake Cooking Oil 3L Jerrycan' and delivery_date = '2025-03-15' and delivery_trip_id = '0K3MKBH9T2KQD' order by created_at
+--where delivery_trip_id = '0JW8J9HR08NHR' and product_bundle_id = 'Golden Penny Spaghetti 500g PACK (20.0 PACKETS)'and delivery_note_id = '0JVXEQDV88M1H'
+ --and sale_order_id = 'SO-0JVSCE4XYYNRM' order by created_at
+ order by timestamp(created_at) 
