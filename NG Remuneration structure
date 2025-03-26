@@ -1,0 +1,226 @@
+----------------MD Remuneration Structure - NG ---------
+---------------- Created By Cleophas ------------------
+----------------MD Remuneration Structure - NG ---------
+---------------- Created By Cleophas ------------------
+with
+-----------------Uploaded Monthly Remuneration structure----------
+nigeria_remuneration as (
+                            select start_date,
+                            end_date,
+                            format_date('%Y-%m', start_date) as month,
+                            kpi,
+                            country,
+                            fixed_salary,
+                            variable_pay,
+                            tier_1_min,
+                            tier_1_max
+                            tier_1_unlocked_variable
+                            from `kyosk-prod.karuru_sales_commission.unlocked_kpi_variables`
+                            where country = 'NIGERIA'
+),
+--------------------Date Variables----------------------------
+dates as (
+SELECT * 
+FROM  UNNEST(GENERATE_DATE_ARRAY('2022-03-01',date_sub(CURRENT_DATE(),interval 1 day), INTERVAL 1 DAY)) AS date
+),                    
+------------------- Sale Orders------------------------
+sales_orders_with_index as (
+                            select *,
+                            row_number()over(partition by id order by last_modified_date desc) as index 
+                            from `kyosk-prod.karuru_reports.sales_order` 
+                            where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                            and order_status not in ('INITIATED')
+                            and date(created_date) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+sales_order_items_cte as (
+                            select distinct date(sowi.created_date) as creation_date,
+                            sowi.id as sales_order_id,
+                            territory.id as territory_id,
+                            soi.product_bundle_id,
+                            soi.catalog_item_qty,
+                            soi.selling_price,
+                            soi.catalog_item_qty * soi.discount_amount as discount_amount,
+                            soi.net_total as total_amount,
+                            soi.uom,
+                            soi.currency,
+                            territory.country_id,
+                            sowi.created_on_app,
+                            sowi.market_developer_name,
+                            route.route_name,
+                            outlet.id,
+                            outlet.name
+                            from sales_orders_with_index sowi, unnest(items) soi
+                            where index = 1
+                            and territory.country_id = 'Nigeria'
+),
+------------------ Delivery Notes ---------------------------
+delivery_notes_with_index as (
+                            select *,
+                            row_number()over(partition by id order by updated_at desc) as index
+                            from `kyosk-prod.karuru_reports.delivery_notes` 
+                            where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                            and date(created_at) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+delivery_notes_items_cte as (
+                            select date(dnwi.created_at) as created_date,
+                            dnwi.id as delivery_note_id,
+                            dnwi.territory_id,
+                            dnwi.currency,
+                            dnwi.sale_order_id,
+                            oi.product_bundle_id,
+                            oi.qty_delivered,
+                            oi.selling_price,
+                            oi.qty_delivered * oi.discount_amount as discount_amount,
+                            (oi.qty_delivered * oi.selling_price) - (oi.qty_delivered * oi.discount_amount) as amount_delivered ,
+                            oi.status as item_status,
+                            outlet.name,
+                            outlet.id as outlet_id,
+                            dnwi.agent_name,
+                            dnwi.route_id,
+                            dnwi.route_name,
+                            territory.country_id,
+                            date(dnwi.delivery_date) as delivery_date
+                            from delivery_notes_with_index dnwi, unnest(order_items) oi
+                            where index = 1
+                            and country_code = 'NG'
+                            and dnwi.delivery_date is not null
+),
+-------------------Reactivated Outlets --------------
+prev_month_data as (
+                            select id,
+                            active_status,
+                            month,
+                            row_number()over(partition by id order by month desc) as index
+                            FROM `kyosk-prod.karuru_scheduled_queries.customer_journey`
+                            WHERE month = date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+curr_month as (
+                            select curr.id, 
+                            curr.market_name,
+                            curr.phone_number,
+                            format_date('%Y-%m', curr.month) as month,
+                            curr.route_id, 
+                            curr.final_agent_name, 
+                            curr.months_since_last_delivery, 
+                            curr.active_status as current_month_status,
+                            prev.active_status as previous_month_status 
+                            from `kyosk-prod.karuru_scheduled_queries.customer_journey` curr
+                            left join prev_month_data prev on curr.id = prev.id and prev.month = date_sub(curr.month, interval 1 month)
+                            and prev.index = 1
+                            where curr.month >= date_trunc(current_date(), month)
+                            and curr.active_status ='Re-activated'
+                            and prev.active_status in ('Dormant', 'Churned')
+),
+------------------ Mashup----------------------------
+so_dn_cte as (
+                            select distinct soi.market_developer_name,
+                            format_date('%Y-%m', date(dni.delivery_date)) as month,
+                            dni.territory_id,
+                            sum(dni.amount_delivered) as gmv,
+                            dni.country_id,
+                            from delivery_notes_items_cte dni
+                            left join sales_order_items_cte soi on dni.product_bundle_id = soi.product_bundle_id  and dni.sale_order_id = soi.sales_order_id and dni.agent_name = soi.market_developer_name
+                            left join dates d on dni.delivery_date = d.date
+                            left join curr_month cm on soi.id = cm.id and soi.market_developer_name = cm.final_agent_name
+                            group by 1,2,3,5
+),
+variable_kpi_performance_revenue_outlets as (
+                            select distinct dn.agent_name,
+                            format_date('%Y-%m', date(dn.delivery_date)) as month,
+                            count(distinct dn.outlet_id) as count_of_revenue_outlets
+                            from delivery_notes_items_cte dn
+                            group by 1,2
+),
+variable_kpi_performance_reactivated_outlets as (
+                            select distinct cm.final_agent_name,
+                            cm.month,
+                            count(distinct cm.id) as reactivated_outlets
+                            from curr_month cm
+                            group by 1,2
+),
+variable_kpi_performance_work_days as (
+                            select distinct dni.agent_name,
+                            format_date('%Y-%m', date(dni.delivery_date)) as month,
+                            count(distinct dni.delivery_date) as total_work_days,
+                            count(distinct dni.delivery_note_id) as total_dns,
+                            count(distinct case when soi.created_on_app= 'Duka App' then dni.delivery_note_id ELSE NULL END) AS count_of_duka_dns
+                            from delivery_notes_items_cte dni
+                            left join sales_order_items_cte soi on format_date('%Y-%m', date(dni.created_date)) = format_date('%Y-%m', date(soi.creation_date)) and dni.agent_name = soi.market_developer_name and dni.sale_order_id = soi.sales_order_id
+                            group by 1,2
+),
+sales_orders_index as (
+                            select *,
+                            row_number()over(partition by id order by last_modified_date desc) as index 
+                            from `kyosk-prod.karuru_reports.sales_order` 
+                            where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                            and order_status not in ('INITIATED')
+                            and date(created_date) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+sale_order_mds as (
+                            select distinct so.market_developer_name,
+                            market_developer.first_name,
+                            market_developer.last_name
+                            from sales_orders_index so
+),
+outlet_registration_date as (
+                            SELECT *,
+                            row_number()over(partition by id order by updated_at desc) as index
+                            from `kyosk-prod.karuru_reports.outlets` 
+                            where date(created_at) >= date_sub(current_date(), interval 1 month)
+),
+outlets_activation_data as (
+                            select distinct format_date('%Y-%m',date(ord.created_at)) as registration_month,
+                            som.market_developer_name,
+                            count(distinct ord.id )as outlet_count,
+                            from outlet_registration_date ord
+                            left join sale_order_mds som on market_developer.first_name = som.first_name and market_developer.last_name = som.last_name 
+                            where index = 1
+                            group by 1,2
+),
+md_monthly_performance as (
+                            select sdc.*,
+                            vkpr.reactivated_outlets,
+                            vkpw.total_work_days,
+                            vkpw.total_dns,
+                            vkpw.count_of_duka_dns,
+                            oad.outlet_count as activated_duka_count,
+                            vkpro.count_of_revenue_outlets
+                            from so_dn_cte sdc
+                            left join variable_kpi_performance_reactivated_outlets vkpr on sdc.month = vkpr.month and sdc.market_developer_name = vkpr.final_agent_name
+                            left join variable_kpi_performance_work_days vkpw on sdc.month = vkpw.month and sdc.market_developer_name = vkpw.agent_name
+                            left join outlets_activation_data oad on sdc.month = oad.registration_month and sdc.market_developer_name = oad.market_developer_name
+                            left join variable_kpi_performance_revenue_outlets vkpro on sdc.month = vkpro.month and sdc.market_developer_name = vkpro.agent_name
+),
+md_costing as (
+                            select mmp.*,
+                            nr.kpi,
+                            nr.variable_pay,
+                            nr.fixed_salary,
+                            nr.tier_1_min,
+                            from md_monthly_performance mmp
+                            left join nigeria_remuneration nr on mmp.month = nr.month and lower(mmp.country_id )= lower(nr.country) 
+
+),
+md_cost_computation as (
+                        select mcc.*,
+                        case  when mcc.kpi = 'workdays' and mcc.total_work_days < 26 then (safe_divide(mcc.total_work_days, 26) * mcc.fixed_salary)
+                              when mcc.kpi =   'workdays' and mcc.total_work_days >= 26 then mcc.fixed_salary
+                              else 0 end as unlocked_fixed_pay,
+                        case when mcc.kpi = 'Reactivated Outlets' and safe_divide(mcc.reactivated_outlets, 26) >= 0.75 then mcc.variable_pay
+                              else 0 end as unlocked_v_1,
+                        case when mcc.kpi = "Duka App" and safe_divide(mcc.count_of_duka_dns, mcc.total_dns) >= 0.75 then mcc.variable_pay
+                              else 0 end as unlocked_v_2,
+                        case when mcc.kpi = 'Activated Outlets' and safe_divide(mcc.activated_duka_count, 26) >= 0.75 then mcc.variable_pay
+                              else 0 end as unlocked_v_3,
+                        case when mcc.kpi = 'Revenue Outlets' and safe_divide(mcc.count_of_revenue_outlets, 130) >= 1 then mcc.variable_pay
+                              else 0 end as unlocked_v_4,
+                        case when mcc.kpi = 'Revenue' and safe_divide(mcc.gmv, 1) >= 0.85 then mcc.variable_pay
+                              else 0 end as unlocked_v_5
+                        from md_costing mcc  
+)
+select mdc.*except(kpi,tier_1_min,variable_pay,fixed_salary,unlocked_fixed_pay,unlocked_v_1,unlocked_v_2,unlocked_v_3,unlocked_v_4,unlocked_v_5),
+round(sum(mdc.unlocked_fixed_pay),2) as unlocked_fixed_pay,sum(mdc.unlocked_v_1) as unlocked_v_1,sum(mdc.unlocked_v_2) as unlocked_v_2,sum(mdc.unlocked_v_3) as unlocked_v_3, sum(mdc.unlocked_v_4) as unlocked_v_4, sum(mdc.unlocked_v_5) as unlocked_v_5,
+round(sum(mdc.unlocked_fixed_pay) + sum(mdc.unlocked_v_1) + sum(mdc.unlocked_v_2) + sum(mdc.unlocked_v_3) + sum(mdc.unlocked_v_4) + sum(mdc.unlocked_v_5),2) as total_unlocked_md_pay
+from md_cost_computation mdc
+where month = '2025-03' and  market_developer_name = 'Moses Hope'
+group by 1,2,3,4,5,6,7,8,9,10,11
