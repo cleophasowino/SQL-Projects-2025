@@ -1,0 +1,25 @@
+with
+month_series as (
+                  select format_date('%B %Y', date_sub(date_trunc(current_date(), month), interval n month)) as month,
+                  date_sub(date_trunc(current_date(), month), interval n month) AS month_start
+                  from unnest(generate_array(1,date_diff(date_trunc(current_date(), month), DATE '2019-01-01', month))) as n
+),
+active_employees as (
+                  select distinct id,
+                  employee_name,
+                  designation,
+                  department,
+                  employment_type,
+                  cost_centre,
+                  territory,
+                  status,
+                  date_of_joining 
+                  from `appsheet_data.erp_employee`
+)
+select ae.*,
+ms.month,
+from active_employees ae
+cross join month_series ms
+where status = 'ACTIVE'
+and ms.month_start >= date_add(date_trunc(parse_date('%Y-%m-%d', date_of_joining), MONTH), interval 1 MONTH)
+and employee_name like "%Jimmy%"
