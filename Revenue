@@ -1,0 +1,351 @@
+---------------------------- Access Managed Revenue Report -----------------------------
+---------------------------- Created By : Jimmy ---------------------------------------
+with
+------------------------------ Manage Territory Dashboard Access from ERP ----------------------
+erp_employee_list as (
+                      select distinct edac.user_id,
+                      edac.department,
+                      edac.kyosk_business_unit,
+                      territory_list
+                      from `kyosk-prod.karuru_views.erp_dashboard_access_mapping` edac,unnest(new_territory_list) territory_list
+                    ),
+---------------------------------- Uploaded Tables ---------------------------------------------
+regional_mapping as (
+                    select distinct
+                    region,
+                    sub_region,
+                    division,
+                    original_territory_id,
+                    new_territory_id, 
+                    from `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+                    ),
+uploaded_zero_md_routes_cte as (
+                                select distinct country_id,
+                                territory_id,
+                                route_id,
+                                route_name,
+                                zero_md_route
+                                from `kyosk-prod.karuru_upload_tables.zero_md_routes` 
+                                where zero_md_route = true
+                                ),
+------------------------ Item Group Mapping -----------------------------------
+item_group_mapping as (
+                        select distinct country_code,
+                        item_group_id,
+                        type
+                        from `kyosk-prod.karuru_upload_tables.item_group_mapping` 
+                        --where country_code = 'KE'
+                        ),
+------------------------ New Category Mapping -----------------------------------
+new_categories_item_v2 as (
+                            select distinct country_code,
+                            product_bundle_id, 
+                            sku_type,
+                            FROM `kyosk-prod.karuru_upload_tables.new_categories_sku`
+                            ),  
+----------------------- Service Providers --------------------------------------
+service_provider as (
+                      select *,
+                      row_number()over(partition by id order by updated_at desc) as index
+                      from `kyosk-prod.karuru_reports.service_provider` 
+                      WHERE date(created_at) > "2021-01-01"
+                      ),
+service_provider_cte as (
+                          select distinct 
+                          id,
+                          name,
+                          from service_provider
+                          where index = 1
+                          ),
+------------------------------ Delivery Trip Data -------------------------------
+delivery_trip_with_index as (
+                            select *,
+                            row_number()over(partition by id order by updated_at desc) as index
+                            FROM `kyosk-prod.karuru_reports.delivery_trips` 
+                            where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 2 month)
+                            and territory_id not in ('Test UG Territory', 'Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test Fresh TZ Territory')
+                            ),
+delivery_trip_data as (
+                      select distinct dt.id,
+                      dt.code,
+                      coalesce(v2vsp.name, vsp.name) as vehicle_service_provider_name
+                      from delivery_trip_with_index dt
+                      left join service_provider_cte vsp on dt.vehicle_provider_id = vsp.id
+                      left join service_provider_cte v2vsp on dt.vehicle_v2.service_provider_id = v2vsp.id
+                      where index = 1
+                      ),
+---------------------------- Fulfilment Centers --------------------
+fulfillment_center as (
+                        select *,
+                        row_number()over(partition by id order by updated_at desc) as index 
+                        from `kyosk-prod.karuru_reports.fulfillment_center` 
+                        where date(created_at) >= "2021-06-27" #start date
+                        ),
+fulfillment_center_cte as (
+                            select distinct --date(created_at) created_at,
+                            id,
+                            name,
+                            --country_code,
+                            location.latitude,
+                            location.longitude
+                            from fulfillment_center
+                            where index =1 
+                            ),
+------------------- Market Activators -------------------------------
+market_activators as (
+                      select *,
+                      row_number()over(partition by id order by bq_upload_time desc) as index
+                      from `karuru_reports.market_activators`
+                      where date(created_at) >= '2023-08-01'
+                    ),
+market_activators_cte as (
+                          select distinct --created_at,
+                          id,
+                          names,
+                          email,
+                          msisdn,
+                          market_id,
+                          active
+                          from market_activators
+                          where index = 1
+                          ),   
+----------------------- Promotions Data ----------------------------
+so_and_promo_data as (
+                      select distinct id,
+                      product_bundle_id,
+                      promotion_name
+                      from `karuru_views.sales_order_and_promotions_mashup`
+                      ),
+----------------------- Product Bundle Data ---------------------------
+product_bundle_with_index as (
+                              select *,
+                              row_number()over(partition by id order by modified desc) as index
+                              from `kyosk-prod.karuru_reports.product_bundle` 
+                              where date(creation) >= '2018-01-01' 
+                              --and disabled = false
+                              ),
+product_bundle_data as (
+                        select distinct pb.non_stock_item_id,
+                        pb.uom,
+                        si.stock_item_id,
+                        si.stock_uom,
+                        si.conversion_factor
+                        from product_bundle_with_index pb,unnest(stock_items) si
+                        where index = 1
+                        ),
+---------------------- Items Data ----------------------------------
+items_with_index as (
+                    select *,
+                    row_number()over(partition by id order by modified desc) as index 
+                    from `kyosk-prod.karuru_reports.item` 
+                    where date(creation) >= '2018-01-01'
+                    --and disabled = false
+                    ),
+items_data as (
+              select distinct item_code,
+              item_group_id
+              from items_with_index iwi
+              where index = 1
+              --and iwi.maintain_stock = true
+              ),
+---------------------------------------- Delivery Notes -----------------------------------------------------------
+delivery_notes_with_index as (
+                              select *,
+                              row_number()over(partition by id order by updated_at desc ) as index
+                              from `karuru_reports.delivery_notes` 
+                              where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                              and date(created_at) >= date_sub(date_trunc(current_date(), month), interval 2 month)
+                              --where date(created_at) >= '2023-08-01'
+                              --and code in ('DN-KHETIA -EIKT-0HETJVR8X2M9D', 'DN-KISU-0HETRYRSN2MZ8')
+                              --and code = 'DN-KHETIA -EIKT-0HETJVR8X2M9D'
+                            ),
+delivery_notes_items_gmv as (
+                            select distinct 
+                            /*case when dn.country_code in ('KE','UG','TZ') then coalesce(date(date_add(dn.delivery_date,interval 3 hour)),date(date_add(dn.updated_at,interval 3 hour)))
+                                 when dn.country_code in ('NG') then coalesce(date(date_add(dn.delivery_date,interval 1 hour)),date(date_add(dn.updated_at,interval 3 hour)))
+                            else coalesce(date(delivery_date), date(updated_at)) end as delivery_date,*/
+                            coalesce(date(delivery_date), date(updated_at)) as delivery_date,
+                            --format_time("%R",coalesce(time(delivery_date), time(updated_at))) as delivery_time,
+                            --dn.delivery_window.delivery_date as scheduled_delivery_date,
+  							coalesce(dn.delivery_window.delivery_date, dn.scheduled_delivery_date) as scheduled_delivery_date,
+
+                            dn.country_code,
+                            dn.territory_id,
+                            dn.route_id,
+                            dn.route_name,
+                            dn.fullfilment_center_id,
+                            
+                            dn.code,
+                            dn.id,
+                            dn.status,
+                            dn.sale_order_id,
+                            dn.sale_order_code,
+                            
+                            dn.agent_name,
+
+                            dn.delivery_trip_id,
+                            
+                            dn.driver.name as driver_name,
+                            dn.outlet_id,
+                            cast(dn.outlet.latitude as float64) as outlet_latitude,
+                            cast(dn.outlet.longitude as float64) as outlet_longitude, 
+                            dn.outlet.name as outlet_name,
+                            dn.outlet.outlet_code,
+                            
+                            oi.item_group_id,
+                            oi.product_bundle_id,
+                            coalesce(oi.uom,pbd.uom) as uom,
+                            oi.qty_delivered,
+                            oi.discount_amount * qty_delivered as discount_amount,
+                            oi.total_delivered - (oi.discount_amount * qty_delivered) as total_delivered,
+
+                            dn.so_created_on_app as created_on_app,
+                            dn.so_created_by,
+                            oi.inventory_items
+                            from delivery_notes_with_index dn,unnest(order_items) oi
+                            left join product_bundle_data pbd on oi.product_bundle_id = pbd.non_stock_item_id
+                            where index = 1
+                            and dn.status in ('PAID','DELIVERED','CASH_COLLECTED')
+                            and oi.status = 'ITEM_FULFILLED'
+                            ),
+delivery_notes_items_and_inventory_items as (
+                                              select distinct dni.delivery_date,
+                                              format_time("%R",time(dni.delivery_date)) as delivery_time,
+                                              dni.scheduled_delivery_date,
+
+                                              dni.country_code,
+                                              dni.territory_id,
+                                              dni.route_id,
+                                              dni.route_name,
+                                              dni.fullfilment_center_id,
+                                              
+                                              dni.code,
+                                              dni.id,
+                                              dni.status,
+                                              dni.sale_order_id,
+                                              dni.sale_order_code,
+                                              
+                                              dni.agent_name,
+
+                                              dni.delivery_trip_id,
+                                              
+                                              dni.driver_name,
+                                              dni.outlet_id,
+                                              dni.outlet_latitude,
+                                              dni.outlet_longitude, 
+                                              dni.outlet_name,
+                                              dni.outlet_code,
+                                              
+                                              coalesce(dni.item_group_id,id.item_group_id) as item_group_id,
+                                              dni.product_bundle_id,
+                                              ii.stock_item_id,
+                                              row_number()over(partition by dni.id,dni.product_bundle_id) as stock_item_for_bundle_index,
+
+                                              dni.uom,
+                                              dni.qty_delivered,
+                                              dni.discount_amount,
+                                              dni.total_delivered,
+
+                                              dni.created_on_app,
+                                              dni.so_created_by,
+                                              from delivery_notes_items_gmv dni,unnest(inventory_items) ii
+                                              left join items_data id on ii.stock_item_id = id.item_code
+                                              ),
+gmv_report as (
+                select distinct dn.delivery_date,
+                dn.delivery_time,
+                dn.scheduled_delivery_date,
+                dn.country_code,
+                dn.fullfilment_center_id,
+                dtd.code as delivery_trip_code,
+
+                dtd.vehicle_service_provider_name,
+                
+                --fc.name,
+                /*case when fc.name = "Khetia " then 'Khetia' 
+                      when fc.name = 'Kapa Oil Mahitaji FC' then 'Kapa Oil Mahitaji FC'
+                else rm.new_territory_id  end as fullfilment_center_name,*/
+                case when fc.name in ('Majengo Mombasa','Eastlands','Kisumu1','Abuja-Bwari','Nassarawa-Karu') then rm.new_territory_id
+                else fc.name  end as fullfilment_center_name,
+                --rm.region,
+                --rm.sub_region,
+                --rm.division,
+                rm.new_territory_id as territory_id,
+                cast(fc.latitude as float64) as warehouse_latitude,
+                cast(fc.longitude as float64) as warehouse_longitude,
+                round(st_distance(ST_GEOGPOINT(cast(fc.longitude as float64), cast(fc.latitude as float64)), ST_GEOGPOINT(outlet_longitude, outlet_latitude)),0) / 1000 as distance_in_kms,
+                dn.route_id,
+                dn.route_name,
+                case when dn.route_id = uzmdr.route_id then 'YES' else 'NO' end as zero_md_route,
+
+                dn.id,
+                dn.code,
+                dn.sale_order_id,
+                dn.sale_order_code,
+                dn.status,
+
+                dn.so_created_by as created_by,
+                dn.agent_name,
+                ma.names as market_activator_on_route,
+                ma.names as market_activator,
+                case 
+                  when (dn.country_code in ('NG', 'UG')) and (created_on_app = 'Duka App') then  'Kyosk App'
+                  when (dn.country_code in ('NG', 'UG')) and (created_on_app = 'AgentApp') and (dn.so_created_by = ma.email) then 'Market Activator'
+                else 'Market Developer' end as created_by_role,
+                dn.driver_name,
+                dn.outlet_id,
+                dn.outlet_code,
+                dn.outlet_name,
+                dn.outlet_latitude,
+                dn.outlet_longitude,
+                dn.created_on_app,
+
+                dn.item_group_id,
+                dn.product_bundle_id,
+                case when dn.product_bundle_id like '%Bundle%' then 'BUNDLED SKU' else 'NON-BUNDLED SKU' end as bundled_sku_status,
+                dn.uom,
+                dn.qty_delivered,
+                dn.discount_amount,
+                dn.total_delivered,
+
+                coalesce(nci.sku_type, 'GENERAL CATEGORY') as sku_category,
+                igm.type as item_group_type,
+                --oct.kyosk_category,
+                --oct.outlet_group,
+
+                spd.promotion_name,
+                case when spd.promotion_name is not null then 'YES' else 'NO' end as promo_applied_status,
+
+                eel.territory_list,
+                eel.user_id
+                
+                from delivery_notes_items_and_inventory_items dn
+                left join fulfillment_center_cte fc on dn.fullfilment_center_id = fc.id
+                left join regional_mapping rm on dn.territory_id = rm.original_territory_id
+                left join erp_employee_list eel on dn.territory_id = eel.territory_list
+                left join market_activators_cte ma on dn.so_created_by = ma.email --and dn.route_id = 
+                left join new_categories_item_v2 as nci on dn.product_bundle_id = nci.product_bundle_id and  dn.country_code = nci.country_code 
+                left join item_group_mapping igm on dn.item_group_id = igm.item_group_id and dn.country_code = igm.country_code   
+                left join delivery_trip_data dtd on dn.delivery_trip_id = dtd.id    
+                left join so_and_promo_data spd on dn.sale_order_id = spd.id and dn.product_bundle_id = spd.product_bundle_id       
+                left join uploaded_zero_md_routes_cte uzmdr on dn.route_id = uzmdr.route_id     
+                --left join market_activator_mashup mam on dn.route_id = mam.route_id
+                --left join active_market_activator ama on dn.created_by =  ama.email 
+                --left join outlet_category_type oct on dn.outlet_id = oct.outlet_id
+                where stock_item_for_bundle_index = 1
+                and REGEXP_CONTAINS(eel.user_id,@DS_USER_EMAIL)
+                
+              ),
+gmv_with_zones_report as ( 
+                          select *,
+                          case
+                            when distance_in_kms >= 101 then 'Outer Zone'
+                            when distance_in_kms > 61 then 'Middle Zone'
+                            when distance_in_kms >= 0 then 'Inner Zone' 
+                          else null end  as delivery_zone  
+                          from gmv_report
+                          )                         
+select * from gmv_with_zones_report
+--where delivery_note = 'DN-RUIR-0HS6GQ2SZN8BQ'
+--where delivery_note_id = '0JNYK2TB2P4CA'
+where FORMAT_DATE('%Y%m%d', delivery_date) between @DS_START_DATE and @DS_END_DATE
