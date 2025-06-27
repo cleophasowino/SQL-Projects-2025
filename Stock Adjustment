@@ -1,0 +1,57 @@
+----------------------- Access Managed Stock Adjustments Report ----------------------------------
+---------------------------- Created By Cleophas ---------------------------------------------------
+with
+territory_mapping as (
+                      select distinct original_territory_id,
+                      new_territory_id,
+                      warehouse_name,
+                      country,
+                      from `karuru_upload_tables.territory_region_mapping` 
+                      ),
+erp_employee_list as (
+                  select edam.user_id,
+                  territory_list
+                  from `kyosk-prod.karuru_views.erp_dashboard_access_mapping` edam, unnest(new_territory_list) territory_list
+                  ),
+stock_entry_with_index as (
+                          select * ,
+                          row_number()over(partition by id order by modified_at desc) as index
+                          from `kyosk-prod.karuru_reports.stock_entry`
+                          where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 12 month)
+                          ),
+stock_adjustments_data as (
+                          select distinct date(s.posting_date) as posting_date,
+                          s.id,
+                          s.stock_entry_type,
+                          s.workflow_state,
+                          s.company_id,
+                          tm.country,
+                          tm.new_territory_id as territory_id,
+                          i.source_warehouse_id,
+                          i.target_warehouse_id,
+                          i.item_group_id,
+                          i.id as item_id,
+                          i.item_name,
+                          i.stock_uom,
+                          i.qty,
+                          i.amount,
+                          case
+                            when stock_entry_type in ('Stock Adjustment') then -i.amount
+                          else i.amount end as adjusted_amount,
+                          s.reason_for_adjustment,
+                          s.user_email,
+                          s.modified_at,
+                          eel.user_id
+                          from stock_entry_with_index s,unnest(items) i
+                          left join territory_mapping tm on s.territory_id = tm.original_territory_id
+                          left join erp_employee_list eel on s.territory_id = eel.territory_list
+                          where index = 1
+                          and s.stock_entry_type in ('Adjustment Up Receipt','Adjustment Down','Stock Adjustment','Adjustment Down Reverse')
+                          --and s.stock_entry_type = 'Adjustment Down'
+                          )
+select * from stock_adjustments_data
+--where user_id = 'cleophas.owino@kyosk.app'
+--where item_name = 'Pembe Maize Flour 1KG'
+--and territory_id = 'Eastlands'
+where FORMAT_DATE('%Y%m%d', posting_date) between @DS_START_DATE and @DS_END_DATE
+and regexp_contains(user_id, @ds_user_email)
