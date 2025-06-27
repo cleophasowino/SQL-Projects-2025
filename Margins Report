@@ -1,0 +1,238 @@
+---------------------- Access Managed Total Margin Report ---------------------------------
+----------------------------- Created By Jimmy --------------------------------------------
+with
+------------------------- Manage Territory Dashboard Access from ERP ----------------------
+erp_employee_list as (
+                      select distinct edac.user_id,
+                      edac.department,
+                      edac.kyosk_business_unit,
+                      territory_list
+                      from `kyosk-prod.karuru_views.erp_dashboard_access_mapping` edac,unnest(new_territory_list) territory_list
+                    ),
+-------------------------------- Uploaded Tables --------------------------------------------
+regional_mapping as (
+                    select distinct country,
+                    region,
+                    sub_region,
+                    division,
+                    original_territory_id,
+                    new_territory_id,
+                    from `kyosk-prod.karuru_upload_tables.territory_region_mapping`
+                    ),
+new_categories_items as (
+                          select distinct product_bundle_id 
+                          from `karuru_reports.new_categories_items_list`
+                          ),
+uploaded_zero_md_routes_cte as (
+                                select distinct country_id,
+                                territory_id,
+                                route_id,
+                                route_name,
+                                zero_md_route
+                                from `kyosk-prod.karuru_upload_tables.zero_md_routes` 
+                                where zero_md_route = true
+                                ),
+------------------------ Purchase Receipt Stock Items --------------------------
+purchase_receipt as (
+                      SELECT *,
+                      row_number()over(partition by id order by date_modified desc) as index
+                      FROM `kyosk-prod.karuru_reports.purchase_receipt` 
+                      where buying_type in ('PURCHASING')
+                      and workflow_state in ('COMPLETED')
+                      --where date(date_created) >= '2022-02-01'
+                      and date(date_created) >= date_sub(date_trunc(current_date, month), interval 2 year)
+                      ),
+purchase_receipt_items as (
+                          select distinct date_created,
+                          --cast(posting_date as date) as posting_date,
+                          pr.territory_id,
+                          --pr.supplier,
+                          pr.supplier_name,
+                          pri.item_code,
+                          pri.item_group_id,
+                          --pri.uom
+                          from purchase_receipt pr, unnest(items) as pri
+                          where index = 1 
+                          ),
+get_latest_purchase_receipt_details as (
+                                        select distinct territory_id,
+                                        item_code,
+                                        last_value(supplier_name)over(partition by territory_id,item_code order by date_created ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as latest_sku_territory_supplier,
+                                        last_value(supplier_name)over(partition by item_code order by date_created ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as latest_sku_supplier,
+                                        last_value(item_group_id)over(partition by item_code order by date_created ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as item_group_id
+                                        from purchase_receipt_items
+                                        ),
+-------------------------- Sales Invoice Credit Notes ---------------------------
+sales_invoice_cns as (
+                      select distinct sales_invoice,
+                      item_code,
+                      uom,
+                      inventory_sku,
+                      credit_note_applicable,
+                      unit_price_drop_per_unit as unit_price_drop,
+                      adjusted_unit_cost,
+                      adjusted_total_avg_cost
+                      from `kyosk-prod.karuru_scheduled_queries.sales_invoice_credit_notes` 
+                      --where creation_date >= "2024-09-10" 
+                      where creation_date >= date_sub(date_trunc(current_date(),month),interval 2 month)
+                      and credit_note is not null
+                      --and credit_note = 'CN-f6c8423a-2024'
+                      --and territory_id = 'Embu'
+                      --and inventory_sku = '210 Wheat Flour 2KG'
+                     ),
+----------------------------------- Rebates Data ----------------------------------
+rebates_management_view as (
+                            select distinct rmv.posting_month,
+                            rmv.start_date,
+                            rmv.end_date,
+                            rmv.country,
+                            rmv.territory,
+                            rmv.rebate_type,
+                            rmv.rebate_model,
+                            rmv.supplier,
+                            rmv.inventory_name,
+                            rmv.achieved_rebate_per_unit,
+                            rmv.target_a_rebate
+                            from `kyosk-prod.karuru_views.rebates_management_view` rmv
+                            ),
+----------------------------- Front Margin Data -----------------------------------
+front_margin_report as (
+                      select distinct fm.creation_date,
+                      fm.delivery_date,
+                      fm.company,
+                      rm.country,
+                      rm.region,
+                      rm.sub_region,
+                      rm.division,
+                      fm.territory_id as old_territory_id,
+                      rm.new_territory_id as territory_id,
+                      fm.route_id,
+                      fm.route_name,
+                      case when fm.route_id = uzmd.route_id then 'YES' else 'NO' end as zero_md_route,
+                      case when fm.fullfilment_center_name in ('Majengo Mombasa','Eastlands','Kisumu1','Abuja-Bwari','Nassarawa-Karu') then rm.new_territory_id else fm.fullfilment_center_name end as fullfilment_center_name,
+
+                      fm.sales_invoice,
+                      fm.delivery_note,
+                      fm.outlet_id,
+                      fm.agent_name,
+                      fm.item_group_id,
+                      case when fm.item_code like '%Bundle%' then 'BUNDLED SKU' else 'NON-BUNDLED SKU' end as bundled_sku_status,
+                      fm.item_code,
+                      fm.uom,
+                      fm.item_name_of_packed_item,
+                      fm.uom_of_packed_item,
+                      fm.item_tax_rate,
+                      fm.tax_rate,
+                      fm.qty_of_sales_invoice,
+                      fm.base_amount,
+                      fm.base_net_amount,
+                      fm.qty_of_packed_item,
+                      sic.credit_note_applicable,
+                      sic.unit_price_drop,
+                      sic.unit_price_drop * fm.qty_of_packed_item as total_price_drop,
+                      fm.incoming_rate,
+                      coalesce(sic.adjusted_unit_cost,fm.incoming_rate) as adjusted_unit_cost,
+                      fm.total_incoming_rate,
+                      coalesce(sic.adjusted_total_avg_cost,fm.total_incoming_rate) as adjusted_total_avg_cost,
+                      fm.total_incoming_rate_status,
+                      fm.item_code = nci.product_bundle_id as is_new_category,
+                      coalesce(glpr.latest_sku_territory_supplier, glpr.latest_sku_supplier)  as supplier_name,
+
+                      eel.territory_list,
+                      eel.user_id,
+                      from `kyosk-prod.karuru_scheduled_queries.front_margin` fm
+                      left join regional_mapping rm on fm.territory_id = rm.original_territory_id
+                      left join erp_employee_list eel on fm.territory_id = eel.territory_list
+                      left join new_categories_items nci on fm.item_code = nci.product_bundle_id
+                      left join sales_invoice_cns sic on fm.sales_invoice = sic.sales_invoice and fm.item_code = sic.item_code and fm.item_name_of_packed_item = sic.inventory_sku
+                      left join get_latest_purchase_receipt_details glpr on fm.territory_id = glpr.territory_id and fm.item_name_of_packed_item = glpr.item_code
+                      left join uploaded_zero_md_routes_cte uzmd on fm.route_id = uzmd.route_id
+                      where fm.delivery_date >= date_sub(date_trunc(current_date, month), interval 2 month)
+                      and REGEXP_CONTAINS(eel.user_id,@DS_USER_EMAIL)
+                      --where fm.delivery_date >= '2024-10-01'
+                      --and fm.company = 'KYOSK DIGITAL SERVICES LTD (KE)'
+                      ),
+----------------- To allocate Rebates to the relevant bundled SKUS ------------------
+bundled_skus_data as (
+                    select distinct delivery_date,
+                    sales_invoice,
+                    old_territory_id,
+                    item_code,
+                    tax_rate,
+                    item_name_of_packed_item,
+                    split(item_name_of_packed_item,'/') as stock_items_for_bundle
+                    from front_margin_report
+                    where bundled_sku_status = 'BUNDLED SKU'
+                    ),
+bundled_skus_summary as (
+                    select distinct bsd.delivery_date,
+                    bsd.sales_invoice,
+                    bsd.old_territory_id,
+                    bsd.item_code,
+                    bsd.tax_rate,
+                    bsd.item_name_of_packed_item,
+                    trim(items) as items
+                    from bundled_skus_data bsd,unnest(stock_items_for_bundle) items
+                    ),
+bundled_skus_with_rebates as (
+                              select bs.sales_invoice,
+                              bs.item_code,
+                              bs.tax_rate,
+                              bs.item_name_of_packed_item,
+                              rmv.rebate_model,
+                              rmv.rebate_type,
+                              string_agg(distinct coalesce(glpr.latest_sku_territory_supplier, glpr.latest_sku_supplier),"/" order by coalesce(glpr.latest_sku_territory_supplier, glpr.latest_sku_supplier)) as supplier_name,
+                              sum(rmv.achieved_rebate_per_unit) as achieved_rebate_per_unit,
+                              sum(rmv.achieved_rebate_per_unit) / (1 + bs.tax_rate) as achieved_rebate_per_unit_vat_excl,
+                              sum(rmv.target_a_rebate) as target_a_rebate
+                              from bundled_skus_summary bs
+                              left join rebates_management_view rmv on bs.items = rmv.inventory_name and bs.old_territory_id = rmv.territory and date_trunc(bs.delivery_date,month) = rmv.posting_month
+                              left join get_latest_purchase_receipt_details glpr on bs.old_territory_id = glpr.territory_id and bs.items = glpr.item_code
+                              group by 1,2,3,4,5,6
+                              ),
+------------------------------------ Mashup --------------------------------------------
+front_margin_and_rebates_mashup as (
+                                    select fmr.*except(old_territory_id,supplier_name),
+                                    coalesce(fmr.supplier_name,bsr.supplier_name) as supplier_name,
+                                    coalesce(rmv.rebate_type,bsr.rebate_type) as rebate_type,
+                                    coalesce(rmv.rebate_model,bsr.rebate_model) as rebate_model,
+                                    coalesce(rmv.achieved_rebate_per_unit,bsr.achieved_rebate_per_unit) as achieved_rebate_per_unit,
+                                    coalesce(rmv.achieved_rebate_per_unit,bsr.achieved_rebate_per_unit) / (1 + fmr.tax_rate) as achieved_rebate_per_unit_vat_excl,
+                                    coalesce(sum(rmv.target_a_rebate),sum(bsr.target_a_rebate)) as target_a_rebate
+                                    from front_margin_report fmr
+                                    left join bundled_skus_with_rebates bsr on fmr.sales_invoice = bsr.sales_invoice and fmr.item_name_of_packed_item = bsr.item_name_of_packed_item
+                                    left join rebates_management_view rmv on fmr.item_name_of_packed_item = rmv.inventory_name and fmr.old_territory_id = rmv.territory and fmr.country = rmv.country and date_trunc(fmr.delivery_date,month) = rmv.posting_month and fmr.delivery_date between rmv.start_date and rmv.end_date
+                                    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44
+
+                                    ),
+front_margin_and_rebates_summary as (
+                                     select fmrm.* ,
+                                     case when fmrm.rebate_type = 'Fixed Rebates' and fmrm.rebate_model = 'Purchase Amount' then (fmrm.target_a_rebate * (fmrm.adjusted_total_avg_cost / fmrm.qty_of_packed_item))
+                                          when fmrm.rebate_type = 'Fixed Rebates' and fmrm.rebate_model = 'Quantity' then ( fmrm.target_a_rebate / (1 + fmrm.tax_rate))
+                                     else null end as fixed_unit_rebate_vat_excl,
+                                     case when fmrm.rebate_type = 'Fixed Rebates' and fmrm.rebate_model = 'Purchase Amount' then (fmrm.target_a_rebate * (fmrm.adjusted_total_avg_cost / fmrm.qty_of_packed_item))
+                                          when fmrm.rebate_type = 'Fixed Rebates' and fmrm.rebate_model = 'Quantity' then fmrm.target_a_rebate
+                                     else null end as fixed_unit_rebate_vat_incl
+                                     from front_margin_and_rebates_mashup fmrm
+                                     ),
+total_margin_report as (
+                        select fmrm.*,
+                        case when fmrm.rebate_type = 'Fixed Rebates' then fmrm.fixed_unit_rebate_vat_excl 
+                             when fmrm.rebate_type = 'Volume Rebates' then fmrm.achieved_rebate_per_unit_vat_excl 
+                        else 0 end as back_margin_per_unit,
+                        (case when fmrm.rebate_type = 'Fixed Rebates' then fmrm.fixed_unit_rebate_vat_excl 
+                             when fmrm.rebate_type = 'Volume Rebates' then fmrm.achieved_rebate_per_unit_vat_excl 
+                        else 0 end ) * fmrm.qty_of_packed_item as back_margin
+                        from front_margin_and_rebates_summary fmrm
+                        --where country = 'KENYA'
+                        --and rebate_model = 'Purchase Amount' 
+                        --and credit_note_applicable = 'YES'
+                        --where sales_invoice = 'SI-KIAM-0H7T5NR77XN3X-2024'
+                        )
+select * 
+from total_margin_report
+--where sales_invoice = 'SI-KIAM-0H5W050BBXP7J-2024'
+--where sales_invoice = 'ACC-SINV-2024-14279'  --'ACC-SINV-2024-14271'
+--where item_name_of_packed_item = 'Azam  All Purpose Flour 2KG'
+where FORMAT_DATE('%Y%m%d', delivery_date) between @DS_START_DATE and @DS_END_DATE
+--and date_trunc(delivery_date,month) = '2024-12-01'
