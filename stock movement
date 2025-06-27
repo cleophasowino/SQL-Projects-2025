@@ -1,0 +1,359 @@
+------------------------------------------- Access Managed Stock Movement Report---------------------------------------------------------------------
+----------------------------------------------Created By : Cleophas------------------------------------------------------------------------
+with
+-----------------------------Date Variables : To have Start date, End date of a Month as well as the following Month Start Date----------
+dates as (
+          SELECT * 
+          FROM  UNNEST(GENERATE_DATE_ARRAY('2022-02-06',date_add(CURRENT_DATE(),interval 1 year), INTERVAL 1 DAY)) AS date
+          ),
+daily_sale_days as (
+                    select distinct date_trunc(date,month) as start_date,
+                    date_sub(date_add(date_trunc(date,month),interval 1 month),interval 1 day) as end_date,
+                    date_add(date_sub(date_add(date_trunc(date,month),interval 1 month),interval 1 day),interval 1 day) as next_start_date
+                    from dates 
+                    ),
+---------------- Import erp Dashboard Users-------------
+erp_employee_list as (
+                  select edam.user_id,
+                  territory_list
+                  from `kyosk-prod.karuru_views.erp_dashboard_access_mapping` edam, unnest(new_territory_list) territory_list
+                  ),   
+----------------------------------------------------------------------------------------
+territory_mapping as (
+                      select distinct original_territory_id,
+                      new_territory_id,
+                      warehouse_name,
+                      from `karuru_upload_tables.territory_region_mapping` 
+                      ),
+inventory_sku_credit_status as (
+                                SELECT distinct company_id,
+                                item_code, 
+                                credit_status
+                                FROM `kyosk-prod.karuru_upload_tables.inventory_sku_status` 
+                                ),
+new_categories_sku as (
+                      SELECT distinct company_id,
+                      inventory_name,
+                      inventory_uom,
+                      sku_type
+                      FROM `kyosk-prod.karuru_upload_tables.new_categories_sku` 
+                      ),
+--------------------Stock Entry Data : To get Item Group per SKU ----------------------------------------------
+stock_entry_item_group as (
+                            select distinct item_code,
+                            item_group_id,
+                            company_id
+                            from `kyosk-prod.karuru_scheduled_queries.stock_entry_item_to_item_group_mapping`
+                          ),
+---------------------Purchase Receipt Data : To get Purchase Qty and Purchase Value per SKU--------------------------
+purchase_reciept_with_index as (
+                                SELECT *,
+                                row_number()over(partition by id order by date_modified desc) as index
+                                FROM `kyosk-prod.karuru_reports.purchase_receipt` 
+                                where date(date_created) >= '2022-02-01'
+                                ),
+pr_items as (
+              select distinct date_trunc(cast(posting_date as date),month) as posting_month,
+              pr.company_id,
+              pr.territory_id,
+              pri.item_code,
+              pri.uom,
+              sum(pri.received_stock_qty) as received_stock_qty,
+              sum(pri.received_qty) as received_qty,
+              sum(pri.net_amount) as net_amount,
+              sum(pri.amount) as amount
+              from purchase_reciept_with_index pr, unnest(items) as pri
+              where index = 1 
+              and pr.buying_type in ('PURCHASING')
+              and pr.supplier not in ('Test KE Supplier PM', 'Test KE Supplier', 'TEST SUPPLIER') 
+              and pr.territory_id not in ('Test Fresh TZ Territory', 'Test TZ Territory', 'Test NG Territory', 'Test UG Territory')
+              and pr.workflow_state in ('COMPLETED')
+              group by 1,2,3,4,5
+              ),
+---------------------Sales Data : To get Sales Value and Sales Qty per SKU----------------------------------
+front_margin_data as (
+                      select distinct date_trunc(creation_date,month) as creation_month,
+                      --delivery_date,
+                      territory_id,
+                      item_name_of_packed_item,
+                      uom_of_packed_item,
+                      sum(qty_of_packed_item) as qty_of_packed_item,
+                      sum(incoming_rate) as incoming_rate,
+                      sum(total_incoming_rate) as total_incoming_rate
+                      from `karuru_scheduled_queries.front_margin` 
+                      where delivery_date >= date_sub(date_trunc(current_date(), month), interval 2 month)
+                      group by 1,2,3,4
+                      ),
+---------Adjustments & Interwarehouse Data from Stock Entry : To get Adjustments & Interwarehouse Transfer data for each SKU------
+stock_entry_with_index as (
+                          select * ,
+                          row_number()over(partition by id order by modified_at desc) as index
+                          from `kyosk-prod.karuru_reports.stock_entry`
+                          where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 2 month)
+                          and workflow_state = 'COMPLETED'
+                          ),
+stock_entry_data as (
+                    select distinct date_trunc(date(s.posting_date),month) as posting_month,
+                    s.stock_entry_type,
+                    s.company_id,
+                    s.territory_id,
+                    RTRIM(i.item_name) as item_name,
+                    --i.item_group_id,
+                    i.stock_uom,
+                    sum(case when s.stock_entry_type = 'Adjustment Up Receipt' then i.qty else 0 end) as adjustment_up_qty,
+                    sum(case when s.stock_entry_type = 'Adjustment Down' then i.qty else 0 end) as adjustment_down_qty,
+                    sum(i.qty) as qty,
+                    sum(case when s.stock_entry_type = 'Adjustment Up Receipt' then i.amount else 0 end) as adjustment_up_amount,
+                    sum(case when s.stock_entry_type = 'Adjustment Down' then i.amount else 0 end) as adjustment_down_amount,
+                    sum(i.amount) as amount
+                    from stock_entry_with_index s,unnest(items) i
+                    where index = 1
+                    and s.stock_entry_type in ('Adjustment Up Receipt','Adjustment Down')
+                    group by 1,2,3,4,5,6
+                    ), 
+adjustments_per_sku as (
+                        select distinct posting_month,
+                        company_id,
+                        territory_id,
+                        item_name,
+                        --item_group_id,
+                        stock_uom,
+                        sum(adjustment_up_qty) as adjustment_up_qty,
+                        sum(adjustment_down_qty) as adjustment_down_qty,
+                        sum(adjustment_up_qty) - sum(adjustment_down_qty) as net_adjustments_qty,
+                        sum(adjustment_up_amount) as adjustment_up_amount,
+                        sum(adjustment_down_amount) as adjustment_down_amount,
+                        sum(adjustment_up_amount) - sum(adjustment_down_amount) as net_adjustments_amount
+                        from stock_entry_data
+                        group by 1,2,3,4,5
+                       ),
+stock_entry_data_for_transfers as (
+                                  select distinct date_trunc(date(s.posting_date),month) as posting_month,
+                                  RTRIM(i.item_name) as item_name,
+                                  i.stock_uom,
+                                  i.source_warehouse_id,
+                                  i.target_warehouse_id,
+                                  sum(i.qty) as qty,
+                                  sum(i.amount) as amount,
+                                  from stock_entry_with_index s,unnest(items) i
+                                  where index = 1
+                                  and s.stock_entry_type = 'Kyosk Portal Inter-Warehouse'
+                                  group by 1,2,3,4,5
+                                  ),
+source_warehouse_data as (
+                          select distinct posting_month,
+                          item_name,
+                          stock_uom,
+                          'Transfer Out' as inter_warehouse_type,
+                          source_warehouse_id as warehouse,
+                          string_agg(target_warehouse_id,'/'order by target_warehouse_id) as source_or_target_warehouses,
+                          sum(qty) as qty,
+                          sum(amount) as amount
+                          from stock_entry_data_for_transfers
+                          group by 1,2,3,4,5
+                          ),
+target_warehouse_data as (
+                          select distinct posting_month,
+                          item_name,
+                          stock_uom,
+                          'Transfer In' as inter_warehouse_type,
+                          target_warehouse_id as warehouse,
+                          string_agg(source_warehouse_id,'/'order by source_warehouse_id) as source_or_target_warehouses,
+                          sum(qty) as qty,
+                          sum(amount) as amount
+                          from stock_entry_data_for_transfers
+                          group by 1,2,3,4,5
+                          ),
+mashup_data  as (
+                  select * from source_warehouse_data
+                  union all (select * from target_warehouse_data)
+                ),
+inter_warehouse_data as (
+                        select distinct md.posting_month,
+                        md.item_name,
+                        md.stock_uom,
+                        md.warehouse,
+                        max(case when md.inter_warehouse_type = 'Transfer In' then md.source_or_target_warehouses else null end) as source_warehouses,
+                        max(case when md.inter_warehouse_type = 'Transfer Out' then md.source_or_target_warehouses else null end) as target_warehouses,
+                        max(case when md.inter_warehouse_type = 'Transfer In' then md.qty else 0 end) as in_qty,
+                        max(case when md.inter_warehouse_type = 'Transfer Out' then md.qty else 0 end) as out_qty,
+                        max(case when md.inter_warehouse_type = 'Transfer In' then md.amount else 0 end) as in_amount,
+                        max(case when md.inter_warehouse_type = 'Transfer Out' then md.amount else 0 end) as out_amount
+                        from mashup_data md
+                        group by 1,2,3,4
+                        ),
+-----------------------------------------Stock Balance Data------------------------------------------------
+stock_balance_report as (
+                          SELECT distinct osb.opening_balance_date,
+                          dsd.start_date as start_date_of_month,
+                          dsd.end_date as end_date_of_month,
+                          dsd.next_start_date as next_start_date_of_month,
+                          case when opening_balance_date between start_date and next_start_date then (LAST_VALUE(osb.opening_balance_date) OVER (PARTITION BY osb.item_code,osb.warehouse,date_trunc(osb.opening_balance_date,month) ORDER BY opening_balance_date DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) else null end AS opening_stock_date_in_month,
+                          case when opening_balance_date between start_date and next_start_date then (LAST_VALUE(osb.qty_after_transaction) OVER (PARTITION BY osb.item_code,osb.warehouse,date_trunc(osb.opening_balance_date,month) ORDER BY opening_balance_date DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) else 0 end AS opening_qty_after_transaction_in_month,
+                          case when opening_balance_date between start_date and next_start_date then (LAST_VALUE(osb.stock_value) OVER (PARTITION BY osb.item_code,osb.warehouse,date_trunc(osb.opening_balance_date,month) ORDER BY opening_balance_date DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) else 0 end AS opening_stock_value_in_month,
+                          osb.company_id,
+                          --osb.warehouse,
+                          case when osb.opening_balance_date >= '2024-07-08' and osb.warehouse in ("Juja Main - KDKE","Karatina Main - KDKE","Meru Main - KDKE","Eldoret Main - KDKE","Kisii Main - KDKE","Ruai Main - KDKE","Kawangware Main - KDKE","Ongata Rongai Main - KDKE","Themi Main Warehouse - KDTZ","Ilorin Main Warehouse - KDNG","Surulere Main Warehouse - KDNG","Benin- Sapele Main - KDNG","Kano-Sabongari Main - KDNG","PortHarcourt-Obiakpor Main - KDNG") then null else osb.warehouse end as warehouse,
+                          tm.original_territory_id,
+                          tm.new_territory_id as territory_id,
+                          osb.name,
+                          seig.item_group_id,
+                          osb.item_code,
+                          osb.stock_uom,
+                          osb.qty_after_transaction,
+                          osb.valuation_rate,
+                          osb.stock_value
+                          FROM `kyosk-prod.karuru_scheduled_queries.opening_stock_balance`  osb
+                          left join territory_mapping tm on osb.warehouse = tm.warehouse_name
+                          left join daily_sale_days dsd on date_trunc(osb.opening_balance_date,month) = dsd.start_date
+                          left join stock_entry_item_group seig on osb.item_code = seig.item_code and osb.company_id = seig.company_id
+                          WHERE opening_balance_date >= date_sub(date_trunc(current_date, month), interval 2 month)
+  						  and osb.warehouse not in ('Athi River Main - KDKE','Nakuru Main - KDKE')
+                          ),
+opening_stock_balance_data as (
+                                select distinct sbr.opening_stock_date_in_month as opening_date,
+                                date_trunc(sbr.opening_stock_date_in_month,month) as opening_month,
+                                sbr.item_code,
+                                sbr.item_group_id,
+                                sbr.company_id,
+                                sbr.warehouse,
+                                concat(sbr.warehouse,"/",sbr.item_code) as warehouse_item_code_id,
+                                sbr.original_territory_id,
+                                sbr.territory_id,
+                                sbr.stock_uom,
+                                case when sbr.opening_stock_date_in_month = sbr.start_date_of_month then sbr.opening_qty_after_transaction_in_month else 0 end as opening_qty_after_transaction,
+                                case when sbr.opening_stock_date_in_month = sbr.start_date_of_month then sbr.opening_stock_value_in_month else 0 end as opening_stock_value
+                                from stock_balance_report sbr
+                                where date_trunc(opening_stock_date_in_month,month) = sbr.start_date_of_month
+                                and sbr.territory_id is not null
+                                and sbr.warehouse is not null
+                                and sbr.warehouse not in ('Thika Rd Main - KDKE','Mtwapa Mombasa Main - KDKE')
+                                ),
+---To get the opening balance data of the subsequent month
+subsequent_month_opening_stock_balance as (
+                                          select distinct opening_balance_date as opening_date,
+                                          date_trunc(opening_balance_date,month) as opening_month,
+                                          item_code,
+                                          item_group_id,
+                                          company_id,
+                                          warehouse,
+                                          concat(warehouse,"/",item_code) as warehouse_item_code_id,
+                                          original_territory_id,
+                                          territory_id,
+                                          stock_uom,
+                                          qty_after_transaction as opening_qty_after_transaction,
+                                          stock_value as opening_stock_value
+                                          from stock_balance_report
+                                          where opening_balance_date = start_date_of_month 
+                                          and territory_id is not null
+                                          and warehouse is not null
+                                          and warehouse not in ('Thika Rd Main - KDKE','Mtwapa Mombasa Main - KDKE')
+                                          ),
+---To Id SKUs that appeared on the first time in the closing balance data of the selected month(closing balance of selected month is the opening balance of the subsequent month)
+stock_mashup as (
+                  select distinct smos.opening_date,
+                  smos.opening_month,
+                  smos.item_code,
+                  smos.item_group_id,
+                  smos.company_id,
+                  smos.warehouse,
+                  smos.warehouse_item_code_id,
+                  smos.original_territory_id,
+                  smos.territory_id,
+                  smos.stock_uom,
+                  smos.opening_qty_after_transaction,
+                  smos.opening_stock_value,
+                  smos.warehouse_item_code_id = os.warehouse_item_code_id as check
+                  from subsequent_month_opening_stock_balance smos
+                  left join opening_stock_balance_data os on smos.item_code = os.item_code and smos.warehouse = os.warehouse and date_sub(smos.opening_month,interval 1 month) = os.opening_month
+                ),
+missing_stock as (
+                  select * from stock_mashup
+                  where check is not true
+                ),
+-----------------------------------------------------------------------------------------------------------------------------
+opening_stock_balance_report as (
+                                  select distinct opening_date,
+                                  opening_month,
+                                  item_code,
+                                  item_group_id,
+                                  company_id,
+                                  warehouse,
+                                  original_territory_id,
+                                  territory_id,
+                                  stock_uom,
+                                  opening_qty_after_transaction,
+                                  opening_stock_value
+                                  from opening_stock_balance_data 
+                                  union all 
+                                  (select distinct opening_date,
+                                  date_sub(opening_month,interval 1 month) as opening_month,
+                                  item_code,
+                                  item_group_id,
+                                  company_id,
+                                  warehouse,
+                                  original_territory_id,
+                                  territory_id,
+                                  stock_uom,
+                                  0 as opening_qty_after_transaction,
+                                  0 as opening_stock_value
+                                  from missing_stock)
+                                  ),
+closing_stock_balance_report as (
+                                select distinct opening_balance_date,
+                                date_trunc(opening_balance_date,month) as opening_month,
+                                item_code,
+                                item_group_id,
+                                stock_uom,
+                                warehouse,
+                                original_territory_id,
+                                territory_id,
+                                qty_after_transaction,
+                                stock_value
+                                from stock_balance_report
+                                where opening_balance_date = start_date_of_month 
+                                and territory_id is not null
+                                and warehouse is not null
+                                and warehouse not in ('Thika Rd Main - KDKE','Mtwapa Mombasa Main - KDKE')
+                                ),
+opening_and_closing_balance_mashup as (
+                                      select osb.*,
+                                      csb.qty_after_transaction as closing_qty_after_transaction,
+                                      csb.stock_value as closing_stock_value
+                                      from opening_stock_balance_report osb
+                                      left join closing_stock_balance_report csb on osb.item_code = csb.item_code and osb.stock_uom = csb.stock_uom and osb.warehouse = csb.warehouse 
+                                      and osb.opening_month = date_sub(csb.opening_month,interval 1 month)
+                                      ),
+stock_movement as (
+                  select ocbm.*except(original_territory_id),
+                  pri.received_stock_qty as purchase_qty,
+                  pri.net_amount as purchase_value,
+                  fmd.qty_of_packed_item as sales_qty,
+                  fmd.total_incoming_rate as sales_value,
+                  aps.adjustment_up_qty,
+                  aps.adjustment_down_qty,
+                  aps.net_adjustments_qty,
+                  aps.adjustment_up_amount,
+                  aps.adjustment_down_amount,
+                  aps.net_adjustments_amount,
+                  iwd.source_warehouses,
+                  iwd.target_warehouses,
+                  iwd.in_qty,
+                  iwd.out_qty,
+                  iwd.in_amount,
+                  iwd.out_amount,
+                  eel.user_id
+                  from opening_and_closing_balance_mashup ocbm
+                  left join pr_items pri on ocbm.item_code = pri.item_code /*and ocbm.stock_uom = pri.uom*/ and ocbm.opening_month = pri.posting_month and ocbm.original_territory_id = pri.territory_id
+                  left join front_margin_data fmd on ocbm.item_code = fmd.item_name_of_packed_item /*and ocbm.stock_uom = fmd.uom_of_packed_item*/ and ocbm.original_territory_id = fmd.territory_id and ocbm.opening_month = fmd.creation_month
+                  left join adjustments_per_sku aps on ocbm.item_code = aps.item_name /*and ocbm.stock_uom = aps.stock_uom*/ and ocbm.original_territory_id = aps.territory_id and ocbm.opening_month = aps.posting_month
+                  left join inter_warehouse_data iwd on ocbm.item_code = iwd.item_name and ocbm.warehouse = iwd.warehouse and ocbm.opening_month = iwd.posting_month
+                  left join erp_employee_list eel on ocbm.original_territory_id = eel.territory_list
+                  )
+select *
+from stock_movement
+--where opening_month = '2025-06-01'
+---and user_id = 'cleophas.owino@kyosk.app'
+--and item_code = 'Cuettie Large Diapers 40Pc'
+where FORMAT_DATE('%Y%m%d', opening_month) between @DS_START_DATE and @DS_END_DATE
+and regexp_contains(user_id, @ds_user_email)
