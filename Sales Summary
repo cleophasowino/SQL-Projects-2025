@@ -1,0 +1,238 @@
+---------------------[Sales Order, Delivery Note] - Access Managed Sales Summary ----------------
+-----------------------------------------Created By Jimmy----------------------------------------
+---------------------- Last Updated By Jimmy : 2025-04-23 > Included Fulfilment Center ----------
+---------------------- Last Updated By Jimmy : 2025-05-13 > Added VMI Check filter --------------
+with 
+------------------------------------- Manage Dashboard Access ----------------------------------
+------------------------------ Manage Territory Dashboard Access from ERP ----------------------
+erp_employee_list as (
+                      select distinct edac.user_id,
+                      edac.department,
+                      edac.kyosk_business_unit,
+                      territory_list
+                      from `kyosk-prod.karuru_views.erp_dashboard_access_mapping` edac,unnest(new_territory_list) territory_list
+                    ),
+-------------------------------------- Uploaded Tables ------------------------------------------
+regional_mapping as (
+                    select distinct country,
+                    --region,
+                    --sub_region,
+                    --division,
+                    original_territory_id,
+                    new_territory_id
+                    from `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+                    ),
+------------------------- Trimmed Fulfillment Center Details -------
+trimmed_fc_data_cte as (
+                        select fullfilment_center_id,
+                        territory_id,
+                        country_code
+                        from `kyosk-prod.karuru_views.trimmed_fulfillment_center_details`
+                        ),
+---------------------------- Fulfilment Centers --------------------
+fulfillment_center as (
+                        SELECT *,
+                        row_number()over(partition by id order by updated_at desc) as index 
+                        FROM `kyosk-prod.karuru_reports.fulfillment_center` 
+                        WHERE date(created_at) >= "2021-06-27" #start date
+                        ),
+fulfillment_center_cte as (
+                            select distinct fc.id,
+                            fc.name,
+                            tfdc.territory_id,
+                            fc.country_code,
+                            fc.location.latitude,
+                            fc.location.longitude
+                            from fulfillment_center fc
+                            left join trimmed_fc_data_cte tfdc on fc.id = tfdc.fullfilment_center_id
+                            where index = 1 
+                            ),
+updated_fulfillment_center_data as (
+                                    select fcc.id,
+                                    case when fcc.name in ('Majengo Mombasa','Eastlands','Kisumu1','Abuja-Bwari','Nassarawa-Karu') then rm.new_territory_id
+                                    else fcc.name  end as name,
+                                    --fcc.territory_id,
+                                    rm.new_territory_id as territory_id,
+                                    rm.original_territory_id,
+                                    fcc.country_code,
+                                    rm.country,
+                                    fcc.latitude,
+                                    fcc.longitude
+                                    from fulfillment_center_cte fcc
+                                    left join regional_mapping rm on fcc.territory_id = rm.original_territory_id
+                                    where fcc.territory_id is not null
+                                    order by 4,3
+                                    --where id in (select distinct fullfilment_center_id from `karuru_reports.delivery_notes` where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 3 month) and territory_id in ("Mwenge","Igoma","Uyole","Luzira","Nalukolongo","Kawempe","Makindye","Ajah","Ibadan-Bodija","Ikeja","Jos-Central","Abuja-Bwari","Warri-Effurun","Bayelsa-Ahodaa","Majengo Mombasa","Voi","Kiambu","Ruiru","Eastlands","Embu","Kisumu1"))
+                                    ),
+------------------------------------- Date Variables --------------------------------------------
+dates as (
+          SELECT * 
+          FROM  UNNEST(GENERATE_DATE_ARRAY('2022-02-06', current_date())) AS date
+          ),
+calendar_dates as ( 
+                  select distinct d.date,
+                  ufcd.country,
+                  ufcd.original_territory_id,
+                  ufcd.territory_id,
+                  ufcd.id as fullfilment_center_id,
+                  ufcd.name as fullfilment_center_name
+                  from dates d,updated_fulfillment_center_data ufcd
+                  where date >= date_sub(date_trunc(current_date(), month), interval 3 month)
+                  ),
+------------------------------------- 1) Sales Order Data ------------------------------------------
+sales_order_with_index as (
+                          SELECT *,
+                          row_number()over(partition by id order by last_modified_date desc) as index 
+                          FROM `kyosk-prod.karuru_reports.sales_order` 
+                          where date(created_date) >= date_sub(date_trunc(current_date(), month), interval 3 month)
+                          and territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                          ),
+sales_order_items_data as (
+                         select distinct --date(so.created_date) as created_date,
+                         case when so.territory.country_id in ('Kenya','Uganda','Tanzania') then date(date_add(so.created_date,interval 3 hour))
+                              when so.territory.country_id in ('Nigeria') then date(date_add(so.created_date,interval 1 hour))
+                         else date(so.created_date) end as created_date,
+                         rm.country,
+                         --rm.sub_region,
+                         --rm.region,
+                         --rm.division,
+                         case when so.territory.country_code = 'ke' then 'KE'
+                              when so.territory.country_code = 'ug' then 'UG'
+                              when so.territory.country_code = 'tz' then 'TZ'
+                              when so.territory.country_code = 'ng' then 'NG'
+                         else null end as country_code,
+                         rm.new_territory_id as territory_id,
+                         so.id,
+                         so.outlet_id,
+                         i.product_bundle_id,
+                         i.uom,
+                         i.fulfilment_status,
+                         i.net_total,
+                         i.inventory_items,
+                         from sales_order_with_index so, unnest(items) i
+                         left join regional_mapping rm on so.territory_id = rm.original_territory_id
+                         where index = 1
+                         and order_status not in ('INITIATED')
+                         --group by 1,2,3,4
+                         ),
+so_inventory_items_cte as (
+                          select distinct soi.created_date,
+                          soi.country,
+                          soi.country_code,
+                          soi.territory_id,
+                          --ii.fulfilment_center_id,
+                          coalesce(nullif(ii.fulfilment_center_id,''),ufcd.id) as fulfilment_center_id,
+                          ii.fulfilment_center_name,
+
+                          soi.id,
+
+                          soi.outlet_id,
+
+                          soi.product_bundle_id,
+                          soi.uom,
+                          soi.fulfilment_status,
+                          soi.net_total
+                          from sales_order_items_data soi, unnest(inventory_items) ii
+                          left join (select * from updated_fulfillment_center_data where trim(name) = trim(territory_id)) ufcd on soi.territory_id = ufcd.territory_id
+                          --group by 1,2,3,4,5,6,7,8,9,10,11
+                          ),
+sales_order_data as (
+                    select distinct so.created_date,
+                    so.country,
+                    so.country_code,
+                    so.territory_id,
+                    so.fulfilment_center_id,
+                    --so.fulfilment_center_name,
+                    count(distinct so.id) as count_of_so,
+                    count(distinct so.outlet_id) as count_of_outlets_placing_orders,
+                    sum(so.net_total) as total_amount
+                    from so_inventory_items_cte so
+                    
+                    group by 1,2,3,4,5
+                    ),
+------------------------------------------- 2) Delivery Note Data---------------------------------------
+delivery_note_with_index as (
+                            select *,                              
+                            row_number()over(partition by id order by updated_at desc ) as index
+                            from `karuru_reports.delivery_notes` 
+                            where date(created_at) >= date_sub(date_trunc(current_date(), month), interval 3 month)
+                            and territory_id not in ('Test UG Territory', 'Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test Fresh TZ Territory')
+                            ),
+---------------------------------------- 2.1) Scheduled Deliveries Data------------------------------------
+schdeuled_dns_report as (
+                          select distinct coalesce(dnwi.delivery_window.delivery_date,dnwi.scheduled_delivery_date) as scheduled_delivery_date,
+                          dnwi.fullfilment_center_id,
+                          rm.new_territory_id as territory_id,
+                          count(distinct dnwi.id) as count_of_scheduled_dns,
+                          count(distinct dnwi.outlet_id) as count_of_outlets_with_scheduled_dns,
+                          sum(oi.total_orderd - (oi.discount_amount * oi.original_item_qty)) as total_orderd
+                          from delivery_note_with_index dnwi,unnest(order_items)oi
+                          left join regional_mapping rm on dnwi.territory_id = rm.original_territory_id
+                          where index = 1
+                          and dnwi.status not in ('EXPIRED','CHANGE_REQUESTED','USER_CANCELLED')
+                          --and code not in (select distinct delivery_note from `karuru_reports.uploaded_ug_orders_to_delete`)
+                          group by 1,2,3
+                          ),
+----------------------------------------- 2.2) Revenue Data------------------------------------
+revenue_report as (
+                  select distinct date(dnwi.delivery_date) as delivery_date,
+                  dnwi.fullfilment_center_id,
+                  rm.new_territory_id as territory_id,
+                  count(distinct dnwi.id) as count_of_delivered_dns,
+                  count(distinct dnwi.outlet_id) as count_of_outlets_with_deliveries,
+                  sum(oi.discount_amount * oi.qty_delivered) as discount_amount,
+                  sum(oi.total_delivered - (oi.discount_amount * oi.qty_delivered)) as total_delivered
+                  from delivery_note_with_index dnwi,unnest(order_items)oi 
+                  left join regional_mapping rm on dnwi.territory_id = rm.original_territory_id
+                  where index = 1 
+                  and dnwi.status in ('PAID','DELIVERED','CASH_COLLECTED')
+                  and oi.status = 'ITEM_FULFILLED'
+                  group by 1,2,3
+                  ),
+--------------------------------- Final Mashup ---------------------------------
+sales_summary as (
+                  select distinct cd.date as calendar_date,
+                  --sod.created_date,
+                  cd.country,
+                  --sod.region,
+                  --sod.sub_region,
+                  --sod.division,
+                  cd.territory_id,
+                  cd.fullfilment_center_id,
+                  cd.fullfilment_center_name,
+                  case when trim(cd.territory_id) = trim(cd.fullfilment_center_name) then 'NO' else 'YES' end as vmi_check,
+
+                  sod.count_of_so,
+                  sod.count_of_outlets_placing_orders,
+                  sod.total_amount,
+
+                  sdr.count_of_scheduled_dns,
+                  sdr.count_of_outlets_with_scheduled_dns,
+                  sdr.total_orderd,
+
+                  rr.count_of_delivered_dns,
+                  rr.count_of_outlets_with_deliveries,
+                  rr.total_delivered,
+
+                  eel.territory_list,
+                  eel.user_id
+                  from calendar_dates cd
+                  left join sales_order_data sod on cd.date = sod.created_date and cd.territory_id = sod.territory_id and cd.fullfilment_center_id = sod.fulfilment_center_id
+                  left join schdeuled_dns_report sdr on cd.date = sdr.scheduled_delivery_date and cd.territory_id = sdr.territory_id and cd.fullfilment_center_id = sdr.fullfilment_center_id
+                  left join revenue_report rr on cd.date = rr.delivery_date and cd.territory_id = rr.territory_id and cd.fullfilment_center_id = rr.fullfilment_center_id
+                  left join erp_employee_list eel on cd.original_territory_id = eel.territory_list
+                  where REGEXP_CONTAINS(eel.user_id,@DS_USER_EMAIL)
+                  )
+select *
+from sales_summary
+--where calendar_date = '2025-04-22'
+--and territory_id = 'Nairobi Inner'
+--and territory_id = 'Kiambu'
+--and fulfilment_center_id = '0HSGKK1RB5PHV'
+--and fulfilment_center_id = '0CNC5F5X8KWEK'
+--where user_id = 'essam.muhammad@kyosk.app'
+--'james.alva@kyosk.app'
+--and calendar_date = '2025-03-11'
+--and territory_id = 'Embu'
+--order by 1 desc
+where FORMAT_DATE('%Y%m%d', calendar_date) between @DS_START_DATE and @DS_END_DATE
