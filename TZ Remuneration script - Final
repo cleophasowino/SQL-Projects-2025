@@ -1,0 +1,308 @@
+--------------------------MD Remuneration Structure - TZ ---------
+-------------------------- Created By Cleophas ------------------
+with
+
+--------------------Date Variables----------------------------
+vars as (
+        SELECT PARSE_DATE('%Y%m%d', @DS_START_DATE) as current_start_date, PARSE_DATE('%Y%m%d', @DS_END_DATE) as current_end_date
+        --SELECT DATE '2025-05-26' as current_start_date, DATE '2025-06-25' as current_end_date  
+),
+all_dates as (
+                select date_add(v.current_start_date, interval day_num DAY) as date
+                from vars v,
+                unnest(generate_array(0, date_diff(v.current_end_date, v.current_start_date, day))) as day_num
+),
+filtered_dates AS (
+                              select 
+                              date
+                              from all_dates
+                              where extract(dayofweek from date) != 1 
+),
+month_days as (
+                              select 
+                              count(*) as days_excluding_sundays
+                              from filtered_dates
+),
+--------------------Territory Region Mapping------------------------------
+territory_region_mapping as (
+                              select distinct new_territory_id,
+                              country,
+                              original_territory_id,
+                              from `kyosk-prod.karuru_upload_tables.territory_region_mapping` 
+),
+-----------------Uploaded Monthly Remuneration structure----------
+nigeria_remuneration as (
+                            select
+                            scuk.*
+                            from `kyosk-prod.karuru_sales_commission.unlocked_kpi_variables` scuk
+                            cross join vars
+                            where vars.current_start_date  between scuk.start_date and scuk.end_date
+                            and vars.current_end_date between scuk.start_date and scuk.end_date
+                            and country = 'TANZANIA'
+                            
+),
+------------------Uploaded MD Reevenue Targets-------------------
+ revenue_targets as ( 
+                    select distinct 
+                    agent_name,
+                    revenue_target,
+                    dukas_target,
+                    start_date,
+                    end_date
+                    from `kyosk-prod.karuru_sales_commission.md_targets`  mdt
+                    cross join vars
+                    where mdt.start_date between vars.current_start_date and vars.current_end_date
+ ),         
+------------------- Sale Orders------------------------
+sales_order_items_cte as (
+                            select distinct sowi.id as sales_order_id,
+                            territory_id,
+                            sowi.created_on_app,
+                            sowi.market_developer_name,
+                            from `kyosk-prod.karuru_sales_commission.karuru_sales_commission_so_data` sowi
+                            cross join vars 
+                            where order_status not in ('INITIATED')
+                            and created_date between vars.current_start_date and vars.current_end_date
+                            
+),
+md_kyosk_app_adoption as (
+                            select distinct market_developer_name,
+                            territory_id,
+                            count(distinct case when created_on_app = 'Duka App' then sales_order_id else null end) as count_of_duka_orders,
+                            count(distinct sales_order_id) as total_count_of_orders
+                            from sales_order_items_cte
+                            group by 1,2
+),
+------------------ Delivery Notes ---------------------------
+delivery_notes_items_cte as (
+                            select distinct dn.delivery_date,
+                            dn.id,
+                            dn.agent_name,
+                            dn.outlet_id,
+                            dn.total_delivered,
+                            dn.territory_id,
+                            from `kyosk-prod.karuru_sales_commission.karuru_sales_commission_dn_data` dn
+                            cross join vars
+                            where dn.delivery_date between vars.current_start_date and vars.current_end_date 
+),
+md_work_days as (
+                            select distinct agent_name,
+                            sum(total_delivered) as gmv,
+                            count(distinct delivery_date) as total_work_days,
+                            count(distinct outlet_id) as count_of_revenue_outlets
+                            from delivery_notes_items_cte
+                            group by 1
+),
+-------------------Reactivated Outlets --------------
+/*date_filter AS (
+-- Define flexible date parameters-----------
+                            select
+                            date_trunc('2025-02-26', month) as selected_start_date, 
+                            date_trunc('2025-03-25', month) as selected_end_date,
+                            date_sub(date_trunc('2025-02-26', month), INTERVAL 1 month) AS selected_prev_month_start
+),*/
+prev_month_data as (
+                            select id,
+                            active_status,
+                            last_delivery_date,
+                            month,
+                            final_agent_name,
+                            --row_number()over(partition by id order by month desc) as index
+                            FROM `kyosk-prod.karuru_scheduled_queries.customer_journey`
+                            --WHERE month = date_sub(date_trunc(current_date(), month), interval 1 month)
+                            cross join vars
+                            --where month between (select date_sub(selected_start_date, interval 1 month) from date_filter) and (select date_sub(selected_end_date, interval 1 month) from date_filter)
+                            where month between date_sub(date_trunc(vars.current_start_date, month), interval 1 month) and date_sub(date_trunc(vars.current_end_date, month), interval 1 month)
+),
+curr_month as (
+                            select curr.id, 
+                            curr.market_name,
+                            format_date('%Y-%m', curr.last_delivery_date) as month,
+                            --prev.last_delivery_date as previous_last_delivery_date,
+                            curr.last_delivery_date as reactivation_date,
+                            curr.route_id, 
+                            curr.final_agent_name, 
+                            curr.months_since_last_delivery, 
+                            curr.active_status as current_month_status,
+                            prev.active_status as previous_month_status 
+                            from `kyosk-prod.karuru_scheduled_queries.customer_journey` curr
+                            left join prev_month_data prev on curr.id = prev.id and prev.month = date_sub(curr.month, interval 1 month)
+                            cross join vars
+                            --where curr.month between (select selected_start_date from date_filter) and (select selected_end_date from date_filter)
+                            where curr.month between  vars.current_start_date and vars.current_end_date
+                            and curr.active_status ='Continued Active'
+                            --and prev.active_status in ('Dormant', 'Churned')
+                            and curr.last_delivery_date between vars.current_start_date and vars.current_end_date
+),
+reactivated_outlets as (
+                            select distinct cm.final_agent_name,
+                            count(distinct cm.id) as retained_outlets
+                            from curr_month cm
+                            group by 1
+),
+active_prev_month_data as (
+                            select distinct pmd.final_agent_name,
+                            count(distinct pmd.id) as active_outlets
+                            from prev_month_data pmd
+                            where active_status in ('Continued Active','New Active','Re-activated')
+                            group by 1
+),
+sales_orders_index as (
+                            select *,
+                            row_number()over(partition by id order by last_modified_date desc) as index 
+                            from `kyosk-prod.karuru_reports.sales_order` 
+                            where territory_id not in ('Test NG Territory', 'Kyosk TZ HQ', 'Test TZ Territory', 'Kyosk HQ','DKasarani', 'Test KE Territory', 'Test UG Territory','Test Fresh TZ Territory')
+                            and order_status not in ('INITIATED')
+                            and date(created_date) >= date_sub(date_trunc(current_date(), month), interval 1 month)
+),
+sale_order_mds as (
+                            select distinct so.market_developer_name,
+                            market_developer.first_name,
+                            market_developer.last_name
+                            from sales_orders_index so
+),
+outlet_registration_date as (
+                            SELECT *,
+                            row_number()over(partition by id order by updated_at desc) as index
+                            from `kyosk-prod.karuru_reports.outlets` 
+                            where date(created_at) >= date_sub(current_date(), interval 2 month)
+),
+outlets_activation_data as (
+                            select distinct 
+                            som.market_developer_name,
+                            count(distinct ord.id )as registered_outlet_count,
+                            from outlet_registration_date ord
+                            left join sale_order_mds som on market_developer.first_name = som.first_name and market_developer.last_name = som.last_name 
+                            cross join vars
+                            where date(ord.created_at) between vars.current_start_date and vars.current_end_date
+                            group by 1
+),
+quarter_md_gmv as (
+                    select  distinct agent_name,
+                    sum(if(format_date('%Y-%m', delivery_date) = format_date('%Y-%m', date_trunc(vars.current_end_date, month)), total_delivered, 0)) as delivered_this_month,
+                    sum(if(format_date('%Y-%m', delivery_date) = format_date('%Y-%m', date_trunc(date_sub(vars.current_end_date, interval 1 month), month)), total_delivered, 0)) as delivered_last_month,
+                    sum(if(format_date('%Y-%m', delivery_date) = format_date('%Y-%m', date_trunc(date_sub(vars.current_end_date, interval 2 month), month)), total_delivered, 0)) as delivered_two_months_ago,
+                    sum(if(format_date('%Y-%m', delivery_date) = format_date('%Y-%m', date_trunc(date_sub(vars.current_end_date, interval 3 month), month)), total_delivered, 0)) as delivered_three_months_ago
+                    from `kyosk-prod.karuru_sales_commission.karuru_sales_commission_dn_data`
+                    cross join vars
+                    where delivery_date between date_trunc(date_sub(vars.current_end_date, interval 3 month), month) and vars.current_end_date
+                    group by 1
+
+),
+---------------------------------Mashup---------------
+mashup_cte as (
+                  select mkap.*,
+                  trm.country,
+                  coalesce(oad.registered_outlet_count, 0) as registered_outlet_count,
+                  coalesce(mwd.gmv,0) as gmv,
+                  coalesce(mwd.total_work_days, 0) as total_work_days,
+                  coalesce(mwd.count_of_revenue_outlets) as count_of_revenue_outlets,
+                  coalesce(ro.retained_outlets, 0) as retained_outlets,
+                  coalesce(apmd.active_outlets, 0) as prev_month_active_outlets,
+                  qmg.delivered_this_month,
+                  qmg.delivered_last_month,
+                  qmg.delivered_two_months_ago,
+                  qmg.delivered_three_months_ago
+                  from md_kyosk_app_adoption mkap 
+                  left join md_work_days mwd on mwd.agent_name = mkap.market_developer_name
+                  left join outlets_activation_data oad on mkap.market_developer_name = oad.market_developer_name
+                  left join reactivated_outlets ro on mkap.market_developer_name = ro.final_agent_name
+                  left join active_prev_month_data apmd on mkap.market_developer_name = apmd.final_agent_name
+                  left join territory_region_mapping trm on mkap.territory_id = trm.original_territory_id
+                  left join quarter_md_gmv qmg on mkap.market_developer_name = qmg.agent_name
+),
+mashup_cte_kpis as (
+                  select mc.*,
+                  nr.kpi,
+                  nr.fixed_salary,
+                  nr.variable_pay,
+                  nr.tier_1_min,
+                  nr.tier_1_max,
+                  nr.tier_1_unlocked_variable,
+                  nr.tier_2_min,
+                  nr.tier_2_max,
+                  nr.tier_2_unlocked_variable,
+                  nr.tier_3_min,
+                  nr.tier_3_max,
+                  nr.tier_3_unlocked_variable,
+                  nr.tier_4_min,
+                  nr.tier_4_max,
+                  nr.tier_4_unlocked_variable,
+                  nr.tier_5_min,
+                  nr.tier_5_max,
+                  nr.tier_5_unlocked_variable,
+                  cast(nr.commission_kpi as int64) as commission_kpi
+                  from mashup_cte mc
+                  left join nigeria_remuneration nr on mc.country = nr.country
+),
+md_cost_computation as (
+                        select mck.*except(kpi,fixed_salary,variable_pay,tier_1_min),
+                        ------------------- Fixed Pay Based on Workdays ---------------------------------------------------------------------------------
+                        case  when mck.kpi = 'workdays' and mck.total_work_days < md.days_excluding_sundays then safe_divide(mck.total_work_days, md.days_excluding_sundays) * mck.fixed_salary
+                              when mck.kpi =   'workdays' and mck.total_work_days >= md.days_excluding_sundays then mck.fixed_salary
+                              else 0 end as unlocked_fixed_pay,
+                        ------------------ Retention of Customers --------------------------------------------------------------------------------------
+                        case  when mck.kpi = 'Retention' and (safe_divide(mck.retained_outlets, mck.prev_month_active_outlets)) between tier_1_min and tier_1_max then (mck.tier_1_unlocked_variable)
+                              when mck.kpi = 'Retention' and (safe_divide(mck.retained_outlets, mck.prev_month_active_outlets)) between tier_2_min and tier_2_max then (mck.tier_2_unlocked_variable)
+                              when mck.kpi = 'Retention' and (safe_divide(mck.retained_outlets, mck.prev_month_active_outlets)) between tier_3_min and tier_3_max then (mck.tier_3_unlocked_variable)
+                              when mck.kpi = 'Retention' and (safe_divide(mck.retained_outlets, mck.prev_month_active_outlets)) between tier_4_min and tier_4_max then (mck.tier_4_unlocked_variable)
+                              when mck.kpi = 'Retention' and (safe_divide(mck.retained_outlets, mck.prev_month_active_outlets)) between tier_5_min and tier_5_max then (mck.tier_5_unlocked_variable)
+                        else 0 end as unlocked_v_retention,
+                        ------------------ Duka App Adoption------------------------------------------------------------------------------------------------
+                        case  when mck.kpi = "Duka App" and (safe_divide(mck.count_of_duka_orders, mck.total_count_of_orders)) between tier_1_min and tier_1_max then (mck.tier_1_unlocked_variable)
+                              when mck.kpi = "Duka App" and (safe_divide(mck.count_of_duka_orders, mck.total_count_of_orders)) between tier_2_min and tier_2_max then (mck.tier_2_unlocked_variable)
+                              when mck.kpi = "Duka App" and (safe_divide(mck.count_of_duka_orders, mck.total_count_of_orders)) between tier_3_min and tier_3_max then (mck.tier_3_unlocked_variable)
+                              when mck.kpi = "Duka App" and (safe_divide(mck.count_of_duka_orders, mck.total_count_of_orders)) between tier_4_min and tier_4_max then (mck.tier_4_unlocked_variable)
+                              when mck.kpi = "Duka App" and (safe_divide(mck.count_of_duka_orders, mck.total_count_of_orders)) >= tier_5_min then (mck.tier_5_unlocked_variable) 
+                        else 0 end as unlocked_v_duka_adoption,
+                        ------------------ Outlet Registration --------------------------------------------------------------------------------------------
+                        case  when mck.kpi = 'Registered Outlets' and (safe_divide(mck.registered_outlet_count, rt.dukas_target)) between tier_1_min and tier_1_max then (mck.tier_1_unlocked_variable)
+                              when mck.kpi = 'Registered Outlets' and (safe_divide(mck.registered_outlet_count, rt.dukas_target)) between tier_2_min and tier_2_max then (mck.tier_2_unlocked_variable)
+                              when mck.kpi = 'Registered Outlets' and (safe_divide(mck.registered_outlet_count, rt.dukas_target)) between tier_3_min and tier_3_max then (mck.tier_3_unlocked_variable)
+                              when mck.kpi = 'Registered Outlets' and (safe_divide(mck.registered_outlet_count, rt.dukas_target)) between tier_4_min and tier_4_max then (mck.tier_4_unlocked_variable)                        
+                        else 0 end as unlocked_v_registration,
+                        ----------------- Gmv Contribution Against Target ------------------------------------------------------------------------------
+                        case  when mck.kpi = 'Revenue' and (safe_divide(mck.gmv, rt.revenue_target)) between tier_1_min and tier_1_max then (mck.tier_1_unlocked_variable)
+                              when mck.kpi = 'Revenue' and (safe_divide(mck.gmv, rt.revenue_target)) between tier_2_min and tier_2_max then (mck.tier_2_unlocked_variable)
+                              when mck.kpi = 'Revenue' and (safe_divide(mck.gmv, rt.revenue_target)) between tier_3_min and tier_3_max then (mck.tier_3_unlocked_variable)
+                              when mck.kpi = 'Revenue' and (safe_divide(mck.gmv, rt.revenue_target)) between tier_4_min and tier_4_max then (mck.tier_4_unlocked_variable)
+                              when mck.kpi = 'Revenue' and (safe_divide(mck.gmv, rt.revenue_target)) between tier_5_min and tier_5_max then (mck.tier_5_unlocked_variable)
+                        else 0 end as unlocked_v_gmv,
+                        ------------------- Quarter Bonus ------------------------------------------------------------------------------------------
+                        case when mck.kpi = 'Quarter Bonus' and 
+                                  safe_divide(mck.delivered_this_month, rt.revenue_target) between tier_1_min and tier_1_max and
+                                  safe_divide(mck.delivered_last_month, rt.revenue_target)  between tier_1_min and tier_1_max and
+                                  safe_divide(mck.delivered_two_months_ago, rt.revenue_target) between tier_1_min and tier_1_max
+                                then mck.tier_1_unlocked_variable
+                              when mck.kpi = 'Quarter Bonus' and
+                                  safe_divide(mck.delivered_this_month, rt.revenue_target) between tier_2_min and tier_2_max and
+                                  safe_divide(mck.delivered_last_month, rt.revenue_target)  between tier_2_min and tier_2_max and
+                                  safe_divide(mck.delivered_two_months_ago, rt.revenue_target) between tier_2_min and tier_2_max
+                                then mck.tier_2_unlocked_variable
+                              when mck.kpi = 'Quarter Bonus' and
+                                  safe_divide(mck.delivered_this_month, rt.revenue_target) >= tier_3_min  and
+                                  safe_divide(mck.delivered_last_month, rt.revenue_target) >= tier_3_min  and
+                                  safe_divide(mck.delivered_two_months_ago, rt.revenue_target) >= tier_3_min
+                                then mck.tier_3_unlocked_variable
+                        end as unlocked_quarter_bonus
+                        from mashup_cte_kpis mck
+                        cross join month_days md
+                        left join revenue_targets rt on mck.market_developer_name = rt.agent_name
+),
+final_md_cost_report as (
+                        select mdcc.*except(unlocked_fixed_pay,unlocked_v_retention,unlocked_v_duka_adoption,unlocked_v_registration,unlocked_v_gmv,tier_1_max,tier_2_max,tier_3_max,tier_4_max,tier_5_max,tier_2_min,tier_3_min,tier_4_min,tier_5_min,tier_1_unlocked_variable,tier_2_unlocked_variable,tier_3_unlocked_variable,tier_4_unlocked_variable,tier_5_unlocked_variable,delivered_this_month,delivered_last_month,delivered_two_months_ago,delivered_three_months_ago,commission_kpi),
+                        sum(mdcc.unlocked_fixed_pay) as unlocked_fixed_pay,
+                        sum(mdcc.unlocked_v_retention) as unlocked_v_retention,
+                        sum(mdcc.unlocked_v_duka_adoption) as unlocked_v_duka_adoption,
+                        sum(mdcc.unlocked_v_registration) as unlocked_v_registration,
+                        --sum(mdcc.unlocked_v_revenue_outlets) as unlocked_v_revenue_outlets,
+                        sum(mdcc.unlocked_v_gmv) as unlocked_v_gmv,
+                        (sum(mdcc.unlocked_fixed_pay) + sum(mdcc.unlocked_v_retention) + sum(mdcc.unlocked_v_duka_adoption) + sum(mdcc.unlocked_v_registration) + sum(mdcc.unlocked_v_gmv)) as total_md_pay
+                        from md_cost_computation mdcc
+                        group by 1,2,3,4,5,6,7,8,9,10,11,12--,13--,14,15--,16,17,18,19,20,21,22,23,24
+)
+select *
+from final_md_cost_report
+--where country = 'TANZANIA'
+--and market_developer_name = 'Paschal Mhina'
+--and unlocked_v_retention > 0
