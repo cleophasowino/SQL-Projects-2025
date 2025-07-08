@@ -1,0 +1,33 @@
+with
+purchase_orders as (
+                    select distinct date(creation) as date,
+                    purchase_order_no,
+                    territory as territory_id,
+                    workflow_state as po_status, 
+                    supplier_name, 
+                    total_qty, 
+                    sum(i.qty * i.base_price_list_rate) as order_incoming_value, 
+                    case when company = 'KYOSK DIGITAL SERVICES LIMITED (UG)' then 'UGX'
+                        when company = 'KYOSK DIGITAL SERVICES LTD (KE)' then 'KES'
+                        when company = 'KYOSK DIGITAL SERVICES LIMITED (TZ)' then 'TZS'
+                        when company = 'KYOSK DIGITAL SOLUTIONS NIGERIA LIMITED'then 'NGN'
+                      else null end as currency
+                    from `karuru_reports.purchase_order`, unnest(items) i
+                    where date(creation)>= '2025-07-01'
+                    and workflow_state in ('SUBMITTED',"PENDING")
+                    and buying_type = 'Purchasing'
+                    group by 1,2,3,4,5,6,company
+                    order by 1 desc
+),
+uploaded_suppliers as (
+                    select * 
+                    from `karuru_upload_tables.uploaded_suppliers`
+),
+mashup_cte as (
+                    select po.*,
+                    us.workflow_state as supplier_status,
+                    us.supplier_group
+                    from purchase_orders po
+                    left join uploaded_suppliers us on po.supplier_name = us.supplier_name
+)
+select * from mashup_cte
