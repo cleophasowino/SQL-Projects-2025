@@ -1,0 +1,10 @@
+
+SELECT distinct date(usage_start_time) as usage_start_date,
+--, date(usage_end_time) as usage_end_time, time(usage_start_time), time(usage_end_time), 
+sum(cost) as cost
+FROM `kyosk-prod.billing_data.gcp_billing_export_resource_v1_016655_A4B945_22B547` 
+where service.description = 'BigQuery'
+and date(_PARTITIONTIME) >= date_sub(date_trunc(current_date(),month),interval 6 month)
+and FORMAT_DATE('%Y%m%d', date(usage_start_time)) between @DS_START_DATE and @DS_END_DATE
+group by 1
+--order by 1 desc
