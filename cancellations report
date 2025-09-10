@@ -1,6 +1,5 @@
 --------- [Delivery Note, Sales Order, Delivery Trip] Delivery Note Cancellations Report ------------
------------------------------- Created By : Jimmy ---------------------------------------------------
-------------------- Last Updated By : Jimmy > Added Zero MD Route Flag 
+------------------------------ Created By : Cleophas ---------------------------------------------------
 with
 ----------------------------------Uploaded Tables----------------------------------------------------
 regional_mapping as (
