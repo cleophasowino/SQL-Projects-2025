@@ -1,11 +1,5 @@
 ---------------------------- Access Managed Sales Reconciliation Report ----------------------
------------------------------------ Created By Jimmy -----------------------------------------
------------------------------ Last Updated By : Jimmy : 2025-04-23 > Updated Service Provider Field
------------------------------ Last Updated By : Jimmy : 2025-05-26 > Updated Service Provider Field to pull data via Driver data
------------------------------ Last Updated By : Jimmy : 2025-05-28 > Added GMV VAT Exl. field
------------------------------ Last Updated By : Jimmy : 2025-07-03 > Added Delivery Note Ordered Qty, Reduced Amount and Reduced Qty
------------------------------ Last Updated By : Jimmy : 2025-07-14 > Updated Weight per UoM to also convert ML to L
------------------------------ Last Updated By : Jimmy : 2025-07-22 > Added DN Delivery Date 
+----------------------------------- Created By Cleophas -----------------------------------------
 ----------------------------- Last updated By : Cleophas : 2025-08-13 > Added a reconciliation flag
 with
 --------------------------- ERP Dashboard Access --------------------------------------------
