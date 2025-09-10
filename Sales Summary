@@ -1,7 +1,5 @@
 ---------------------[Sales Order, Delivery Note] - Access Managed Sales Summary ----------------
------------------------------------------Created By Jimmy----------------------------------------
----------------------- Last Updated By Jimmy : 2025-04-23 > Included Fulfilment Center ----------
----------------------- Last Updated By Jimmy : 2025-05-13 > Added VMI Check filter --------------
+-----------------------------------------Created By Cleophas----------------------------------------
 with 
 ------------------------------------- Manage Dashboard Access ----------------------------------
 ------------------------------ Manage Territory Dashboard Access from ERP ----------------------
