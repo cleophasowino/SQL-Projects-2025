@@ -1,6 +1,5 @@
 -----------------------------------KARURU - KYOSK APP ADOPTION GLOBAL------------------------------
-------------------------------------------CREATED BY Stacey ----------------------------------------
------------Last Updated By : Jimmy : 2024-04-10 Added Discount Amount
+
 with 
 -------------------------------------Uploaded Tables-----------------------------------------------
 territory_region_mapping as (
