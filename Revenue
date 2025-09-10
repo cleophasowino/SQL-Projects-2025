@@ -1,5 +1,5 @@
 ---------------------------- Access Managed Revenue Report -----------------------------
----------------------------- Created By : Jimmy ---------------------------------------
+---------------------------- Created By : Cleophas ---------------------------------------
 with
 ------------------------------ Manage Territory Dashboard Access from ERP ----------------------
 erp_employee_list as (
